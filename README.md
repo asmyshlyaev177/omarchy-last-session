@@ -8,11 +8,15 @@ The whole thing is a small Python package that talks to `hyprctl`, sleeps on Hyp
 
 ## Install
 
+Needs Omarchy 4 (Quattro) or newer.
+
 ```sh
 omarchy plugin add https://github.com/asmyshlyaev177/omarchy-last-session.git --enable
 ```
 
 From then on the plugin saves a snapshot the moment a window opens, closes or moves, and restores it two seconds after the shell starts on your next login. Nothing else needs wiring up: a reboot, a logout, a crash or the power button costs a few seconds of changes at most.
+
+If the command ends with `omarchy-shell is not responding`, the shell took longer than the two seconds its command line waits to reload its plugins, but the plugin is installed. Check `omarchy plugin list`, and run `omarchy plugin enable io.github.asmyshlyaev177.last-session` if it shows as disabled.
 
 ### Optional: leave some windows out
 
@@ -23,6 +27,23 @@ hl.env("OMARCHY_LAST_SESSION_EXCLUDE", "my-autostarted-app,another-class")
 ```
 
 Find a window's class with `hyprctl clients -j | jq '.[].class'`.
+
+## Update
+
+```sh
+omarchy plugin update io.github.asmyshlyaev177.last-session
+```
+
+## Remove
+
+```sh
+omarchy plugin remove io.github.asmyshlyaev177.last-session
+rm -r ~/.local/state/omarchy-last-session
+```
+
+The first command stops the service and deletes the plugin folder. The second deletes the snapshots. Whatever you added by hand stays until you take it out again, namely the `hl.env` line in `hyprland.lua` and the power menu actions in `omarchy-menu.jsonc` from [Apps that need a moment to save](#apps-that-need-a-moment-to-save).
+
+Outside its own folder the plugin writes to its state directory, and to one file of another app. Before it relaunches a Chromium-based browser it sets `profile.exit_type` to `Normal` in the `Preferences` file of each profile in that browser's user data directory, which is `~/.config/BraveSoftware/Brave-Browser` for Brave, or the `--user-data-dir` the browser was running with. Chromium refuses to restore its tabs after what it took for a crash, and a browser that Omarchy killed at shutdown has recorded one. Nothing else in that file changes, and no other app's files are written.
 
 ## How it works
 
