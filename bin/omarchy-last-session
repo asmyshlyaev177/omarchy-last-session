@@ -1,0 +1,11 @@
+#!/usr/bin/env python3
+"""Entry point. The code lives in the omarchy_last_session package next to bin/."""
+
+import os
+import sys
+
+if __name__ == "__main__":
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+    from omarchy_last_session import cli
+
+    sys.exit(cli.main())

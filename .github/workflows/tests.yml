@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.9', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python3 -m unittest discover -s tests -v
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: check .
+      - uses: astral-sh/ruff-action@v3
+        with:
+          args: format --check .
+
+  # Hyprland's backend opens a DRM device to allocate buffers, and no hosted
+  # runner can provide one. Set OLS_LIVE_RUNNER to the label of a self-hosted
+  # runner with a real GPU and the live suite runs there.
+  live:
+    if: vars.OLS_LIVE_RUNNER != ''
+    runs-on: ${{ vars.OLS_LIVE_RUNNER }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: tests/integration/run.sh

@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.asmyshlyaev177.last-session",
+  "name": "Last Session",
+  "version": "0.1.0",
+  "author": "Aleksandr Smyshliaev",
+  "license": "MIT",
+  "repository": "https://github.com/asmyshlyaev177/omarchy-last-session",
+  "description": "Reopens every window from your last session after a reboot or logout, on the workspace and monitor it was on, with floating geometry, groups, fullscreen and pinned state intact. Terminals reopen in their working directory; browsers keep their tabs. Snapshots every minute, so a crash or power button costs at most a minute.",
+  "kinds": [
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml"
+  }
+}

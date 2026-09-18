@@ -1,0 +1,9 @@
+#!/bin/bash
+# Records every request the script under test sends, for the failure message
+# of a live test, then hands over to the real hyprctl.
+[[ -n ${OLS_HYPRCTL_LOG:-} ]] && printf '%s\n' "$*" >> "$OLS_HYPRCTL_LOG"
+for real in /usr/bin/hyprctl /usr/local/bin/hyprctl; do
+    [[ -x $real ]] && exec "$real" "$@"
+done
+echo "hyprctl not found" >&2
+exit 127

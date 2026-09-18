@@ -1,0 +1,36 @@
+#!/bin/bash
+# Stand-in for an editor that serves every window from one process and reopens
+# them itself when it starts, as VS Code does. The window count is its "session
+# file", which the test writes.
+#
+# A second launch cannot start a second process. It reaches the one already
+# running, which opens a window with no project in it — the spare window that
+# turns up when restore launches such an app once per window instead of once
+# per process.
+#
+# Its own socket, so it does not collide with the fake browser's, and a lock
+# named for the compositor run, so a fresh login starts with nothing running.
+socket="$XDG_RUNTIME_DIR/foot-editor.sock"
+lock="$XDG_RUNTIME_DIR/editor-${HYPRLAND_INSTANCE_SIGNATURE:-0}.lock"
+
+open_window() {
+    for _ in $(seq 1 50); do
+        footclient --server-socket="$socket" --no-wait --app-id=code \
+            --title="$1" sleep 86400 2>/dev/null && return
+        sleep 0.2
+    done
+}
+
+if [ -e "$lock" ]; then
+    open_window "Visual Studio Code"
+    exit 0
+fi
+: > "$lock"
+
+count=$(cat "$HOME/.fakeeditor-windows" 2>/dev/null || echo 1)
+(
+    for i in $(seq 1 "$count"); do
+        open_window "project $i - Visual Studio Code"
+    done
+) &
+exec -a code foot --server="$socket"

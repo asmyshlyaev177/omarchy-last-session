@@ -1,0 +1,40 @@
+#!/bin/bash
+# Stand-in for a session-keeping browser: one process owning several windows,
+# which it reopens by itself when relaunched. The window count is its "session
+# file"; the test writes it. Every flag is ignored, --restore-last-session
+# included, as a browser ignores what it does not know.
+#
+# Its app id changes after the first launch, as Chromium's does: started from
+# its desktop entry it is chromium, started from a bare command line, which is
+# how restore relaunches it, chromium-browser. The binary name never changes,
+# so that is what restore has to recognise it by.
+# Its titles drift between launches, as a page's title does while it is open,
+# so restore cannot tell its windows apart by an exact title.
+launched="$HOME/.fakebrowser-launched"
+app_id=chromium
+suffix=""
+if [ -e "$launched" ]; then
+    app_id=chromium-browser
+    suffix=" - reopened"
+fi
+touch "$launched"
+
+count=$(cat "$HOME/.fakebrowser-windows" 2>/dev/null || echo 1)
+# On the way back it reopens them in the other order. A browser promises no
+# order, and whichever window maps first is the one the exec rule catches, so
+# this is the case where the windows can be filled into each other's places.
+order=$(seq 1 "$count")
+if [ -n "$suffix" ]; then
+    order=$(seq "$count" -1 1)
+fi
+(
+    for i in $order; do
+        for _ in $(seq 1 50); do
+            # a command rather than a shell: a prompt would overwrite the title
+            footclient --no-wait --app-id="$app_id" --title="tab $i$suffix" \
+                sleep 86400 2>/dev/null && break
+            sleep 0.2
+        done
+    done
+) &
+exec -a chromium foot --server
