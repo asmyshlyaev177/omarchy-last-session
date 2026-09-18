@@ -119,10 +119,12 @@ class StateDirCase(unittest.TestCase):
         self.session = os.path.join(self.dir.name, "session.json")
         self.disabled = os.path.join(self.dir.name, "disabled")
         self.copy = os.path.join(self.dir.name, "last-shutdown.json")
+        self.restored = os.path.join(self.dir.name, "last-restore.json")
         self.patch(config, "STATE_DIR", self.dir.name)
         self.patch(config, "SESSION_FILE", self.session)
         self.patch(config, "DISABLE_FLAG", self.disabled)
         self.patch(config, "LAST_SHUTDOWN_FILE", self.copy)
+        self.patch(config, "LAST_RESTORE_FILE", self.restored)
 
     def patch(self, target, name, value):
         patcher = mock.patch.object(target, name, value)

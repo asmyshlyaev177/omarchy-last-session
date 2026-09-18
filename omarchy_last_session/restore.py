@@ -7,7 +7,7 @@ import os
 import shlex
 import time
 
-from omarchy_last_session import config, hypr, proc, session, warn
+from omarchy_last_session import chromium, config, hypr, log, proc, relaunch, session, warn
 
 
 def restore_session():
@@ -20,9 +20,10 @@ def restore_session():
     if len(already_open) > config.MAX_PREEXISTING_WINDOWS:
         warn("session already populated, aborting")
         return
+    session.keep_restore_copy()
     origins = hypr.get_monitor_origins()
     ordered = sort_for_launch(windows)
-    launch_saved_windows(ordered, origins)
+    launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
     placed, missing = sweep(ordered, set(already_open), origins)
     for win in missing:
         warn(f"no window turned up for {win['class']}")
@@ -36,12 +37,15 @@ def sort_for_launch(windows):
     return sorted(windows, key=lambda w: (w["workspace"].get("id", 0), w["floating"], w["at"][0], w["at"][1]))
 
 
-def launch_saved_windows(windows, origins):
+def launch_saved_windows(windows, origins, running):
     """Everything is launched before anything is waited for, so a slow app
-    overlaps with the rest instead of holding up the queue."""
+    overlaps with the rest instead of holding up the queue. A Chromium-based
+    browser not running yet is marked as cleanly exited before its launch."""
     for win in windows:
         if not win["spawn"]:
             continue
+        if win["class"] in config.CHROMIUM_BROWSERS and win["class"] not in running:
+            chromium.mark_clean_exit(win["class"], win["cmd"])
         rules = build_exec_rules(win, origins)
         hypr.dispatch(f"hl.dsp.exec_cmd({hypr.quote_lua_long(win['cmd'])}, {rules})")
         time.sleep(config.SPAWN_STAGGER)
@@ -92,19 +96,26 @@ def sweep(pending, seen, origins):
     (entry, address) pairs placed and the entries that never got a window."""
     pending = list(pending)
     placed = []
+    first_seen = {}
     deadline = time.time() + config.SWEEP_TIMEOUT
-    while pending and time.time() < deadline:
+    while pending:
         time.sleep(1)
-        placed += place_new_arrivals(pending, seen, origins)
+        now = time.time()
+        if now >= deadline:
+            break
+        placed += place_new_arrivals(pending, seen, origins, first_seen, now, deadline)
     return placed, pending
 
 
-def place_new_arrivals(pending, seen, origins):
+def place_new_arrivals(pending, seen, origins, first_seen, now, deadline):
     """One pass over the desktop: pair each unseen window with a saved entry
     and put it where that entry says. Updates pending and seen in place."""
     placed = []
     for address, client in hypr.get_managed_clients().items():
         if address in seen:
+            continue
+        first_seen.setdefault(address, now)
+        if is_worth_waiting_for(client, first_seen[address], now, deadline):
             continue
         entry = match_saved_entry(pending, client)
         if entry is None:
@@ -114,9 +125,29 @@ def place_new_arrivals(pending, seen, origins):
         placed.append((entry, address))
         # Moving one member of a group moves the whole group; a group of one
         # is still just a window.
-        if len(client.get("grouped") or []) <= 1 and is_out_of_place(entry, client, origins):
+        fixing = len(client.get("grouped") or []) <= 1 and is_out_of_place(entry, client, origins)
+        log(describe_pairing(entry, client, fixing))
+        if fixing:
             place_window(entry, address, origins)
     return placed
+
+
+def is_worth_waiting_for(client, first_seen_at, now, deadline):
+    """A browser titles a window Untitled, New Tab or about:blank until its
+    page has loaded, and that says nothing about which saved window it is. It
+    gets TITLE_SETTLE seconds, or what is left of the sweep, to say more."""
+    if not is_still_loading(client.get("title", "")):
+        return False
+    return now < min(first_seen_at + config.TITLE_SETTLE, deadline - 1)
+
+
+def describe_pairing(entry, client, fixing):
+    command, title, _ = score_fit(entry, client, get_client_argv(client))
+    return (
+        f"{client.get('class', '')} '{client.get('title', '')}' on workspace {client['workspace'].get('id')}"
+        f" is the saved '{entry.get('title', '')}' from workspace {entry['workspace'].get('id')}"
+        f" (command {command}, title {title:.2f}); {'placing it' if fixing else 'already in place'}"
+    )
 
 
 def match_saved_entry(pending, client):
@@ -124,35 +155,89 @@ def match_saved_entry(pending, client):
     program behind it, since Chromium reports chromium-browser when relaunched
     from a command line rather than from its desktop entry. A window nothing
     matches is never placed and never grouped."""
+    live_argv = get_client_argv(client)
     candidates = [win for win in pending if win["class"] == client.get("class", "")]
     if not candidates:
-        program = get_client_program(client)
+        program = get_program_name_of(live_argv)
         candidates = [win for win in pending if program and get_program_name(win.get("cmd", "")) == program]
-    return pick_best_fit(candidates, client)
-
-
-def pick_best_fit(candidates, client):
-    """One process owns several windows of a class (a browser's) and only
-    their titles tell them apart, so the nearest title wins. The workspace only
-    breaks a tie: a browser opens its windows wherever it likes, and trusting
-    the workspace first fills two windows into each other's places."""
     if not candidates:
         return None
-    return max(
-        candidates,
-        key=lambda win: (
-            score_title_likeness(win.get("title", ""), client.get("title", "")),
-            win["workspace"].get("id") == client["workspace"].get("id"),
-        ),
+    return max(candidates, key=lambda win: score_fit(win, client, live_argv))
+
+
+def score_fit(win, client, live_argv):
+    """A window belongs to the process that runs its saved command, so that
+    comes first: two browsers of one class on different profiles are different
+    apps. Within one process only the titles tell windows apart, so the nearer
+    title wins. The workspace only breaks a tie: a browser opens its windows
+    wherever it likes, and trusting the workspace first fills two windows into
+    each other's places."""
+    return (
+        score_command_match(win.get("cmd", ""), live_argv),
+        score_title_likeness(win.get("title", ""), client.get("title", "")),
+        win["workspace"].get("id") == client["workspace"].get("id"),
     )
+
+
+def score_command_match(cmd, live_argv):
+    """2 when the process runs the saved command line, 1 when it runs the same
+    program, else 0. The restore flag is the plugin's own and is ignored."""
+    try:
+        saved = shlex.split(cmd)
+    except ValueError:
+        saved = []
+    if not saved or not live_argv:
+        return 0
+    ours = set(config.RESTORE_FLAGS.values())
+    if set(saved) - ours == set(live_argv) - ours:
+        return 2
+    return int(os.path.basename(saved[0]) == os.path.basename(live_argv[0]))
+
+
+TITLE_SEPARATORS = (" - ", " \u2014 ")
+# What a browser titles a window until its page has loaded.
+PLACEHOLDER_PAGES = frozenset(("untitled", "new tab", "about:blank"))
 
 
 def score_title_likeness(saved, live):
     """How close two titles are, since a page title drifts while the page is
-    open. An app with no title scores zero and leaves the choice to the workspace."""
-    if not saved or not live:
+    open. The app's own name, which browsers append to every title, is left
+    out, and a title that only says the page is loading scores nothing, so it
+    cannot pick a saved entry by the app name alone. An app with no title
+    scores zero too and leaves the choice to the workspace."""
+    saved_page, live_page = strip_shared_app_name(saved, live)
+    if not saved_page or not live_page or is_placeholder(saved_page) or is_placeholder(live_page):
         return 0.0
-    return difflib.SequenceMatcher(None, saved, live).ratio()
+    return difflib.SequenceMatcher(None, saved_page, live_page).ratio()
+
+
+def strip_shared_app_name(saved, live):
+    """Both titles without the ' - App' they both end in. A live title that is
+    only the app name has no page yet."""
+    saved_page, saved_app = split_title(saved)
+    live_page, live_app = split_title(live)
+    if saved_app and live_app == saved_app:
+        return saved_page, live_page
+    if saved_app and live.strip() == saved_app:
+        return saved_page, ""
+    return saved.strip(), live.strip()
+
+
+def split_title(title):
+    """('page', 'App') for 'page - App', else the whole title and no app."""
+    for separator in TITLE_SEPARATORS:
+        page, found, app = title.rpartition(separator)
+        if found:
+            return page.strip(), app.strip()
+    return title.strip(), ""
+
+
+def is_placeholder(page):
+    return page.lower() in PLACEHOLDER_PAGES
+
+
+def is_still_loading(title):
+    return is_placeholder(split_title(title)[0])
 
 
 def get_program_name(cmd):
@@ -164,9 +249,14 @@ def get_program_name(cmd):
         return ""
 
 
-def get_client_program(client):
-    argv = proc.read_cmdline(client.get("pid", -1)) or []
+def get_program_name_of(argv):
     return os.path.basename(argv[0]).lower() if argv else ""
+
+
+def get_client_argv(client):
+    """The window's process command line. Chromium flattens its own into one
+    string, so it is split back the way save does."""
+    return relaunch.unflatten_argv(proc.read_cmdline(client.get("pid", -1)) or [])
 
 
 def is_out_of_place(win, client, origins):

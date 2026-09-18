@@ -359,8 +359,17 @@ class LiveRestore(unittest.TestCase):
         ids = {m["name"]: m["id"] for m in self.comp.json("monitors")}
         self.assertLess(ids["MON-B"], ids["MON-A"], "ids should swap as across a real reboot")
 
+        # A browser Omarchy killed has recorded a crash, after which Chromium
+        # refuses to restore its session; restore clears the mark before the
+        # relaunch. The stand-in has no profile, so plant one.
+        prefs = os.path.join(self.comp.home, ".config", "chromium", "Default", "Preferences")
+        os.makedirs(os.path.dirname(prefs))
+        with open(prefs, "w") as f:
+            json.dump({"profile": {"exit_type": "Crashed"}}, f)
+
         restored = self.comp.run_script("restore", os.path.join(self.work, "state"))
         self.assertEqual(restored.stderr, "", restored.stdout + "\n" + self.comp.log_tail("hyprland"))
+        self.assertIn("is the saved", restored.stdout, "each placement should be accounted for")
         after = self.snapshot("save", "state-after")
 
         with self.subTest("windows on their workspaces, monitors and geometry"):
@@ -370,6 +379,9 @@ class LiveRestore(unittest.TestCase):
         with self.subTest("the browser is one process again"):
             pids = {c["pid"] for c in self.comp.clients() if app_name(c["class"]) == "chromium"}
             self.assertEqual(len(pids), 1)
+        with self.subTest("the browser's crashed exit was marked clean before its relaunch"):
+            with open(prefs) as f:
+                self.assertEqual(json.load(f)["profile"]["exit_type"], "Normal")
 
     def test_two_windows_of_one_browser_keep_their_own_monitors(self):
         """One process, two windows, the same class: only their titles say

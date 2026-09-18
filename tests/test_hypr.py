@@ -1,6 +1,9 @@
 import io
+import os
+import socket
 import subprocess
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -93,6 +96,119 @@ class MonitorOrigins(unittest.TestCase):
         self.assertEqual(origins["DP-9"], (1920, 0))
         self.assertEqual(origins[1], (1920, 0))
         self.assertEqual(origins["eDP-1"], (0, 0))
+
+
+class Events(unittest.TestCase):
+    """A real socket pair stands in for Hyprland's event socket: the daemon
+    sleeps on it, so what matters is which events wake it."""
+
+    def setUp(self):
+        self.compositor, ours = socket.socketpair(socket.AF_UNIX)
+        self.addCleanup(self.compositor.close)
+        self.addCleanup(ours.close)
+        self.stream = hypr.EventStream(ours)
+
+    def wait(self, timeout=0.2):
+        """(returned, whether it woke before the timeout)."""
+        started = time.monotonic()
+        returned = self.stream.wait(timeout)
+        return returned, time.monotonic() - started < timeout
+
+    def send(self, *lines):
+        self.compositor.send(("".join(f"{line}\n" for line in lines)).encode())
+
+    def test_a_window_opening_wakes_it(self):
+        self.send("openwindow>>0xa,1,foot,foot")
+        self.assertEqual(self.wait(), (True, True))
+
+    def test_a_window_closing_wakes_it(self):
+        self.send("closewindow>>0xa")
+        self.assertEqual(self.wait(), (True, True))
+
+    def test_a_window_changing_workspace_wakes_it(self):
+        self.send("movewindowv2>>0xa,3,3")
+        self.assertEqual(self.wait(), (True, True))
+
+    def test_floating_and_fullscreen_and_group_changes_wake_it(self):
+        for event in ("changefloatingmode>>0xa,1", "fullscreen>>1", "moveintogroup>>0xa"):
+            with self.subTest(event=event):
+                self.send(event)
+                self.assertEqual(self.wait(), (True, True))
+
+    def test_a_title_change_does_not_wake_it(self):
+        """A page with a live ticker retitles several times a second, and a
+        title is not placement: waking on one would be worse than a timer."""
+        self.send("windowtitle>>0xa", "windowtitlev2>>0xa,BTC 80156.6", "activewindow>>foot,x")
+        self.assertEqual(self.wait(), (True, False))
+
+    def test_focus_and_layout_changes_do_not_wake_it(self):
+        self.send("activewindowv2>>0xa", "focusedmon>>DP-9,3", "activelayout>>kbd,us")
+        self.assertEqual(self.wait(), (True, False))
+
+    def test_an_event_split_across_two_reads_is_still_seen(self):
+        self.compositor.send(b"windowtitle>>0xa\nmovewin")
+        self.compositor.send(b"dowv2>>0xa,3,3\n")
+        self.assertEqual(self.wait(), (True, True))
+
+    def test_a_partial_line_alone_does_not_wake_it(self):
+        self.compositor.send(b"openwindo")
+        self.assertEqual(self.wait(), (True, False))
+
+    def test_the_compositor_going_away_stops_the_wait(self):
+        """A session being torn down must not be snapshotted half closed."""
+        self.compositor.close()
+        self.assertEqual(self.wait(), (False, True))
+
+
+class OpenEventStream(unittest.TestCase):
+    def test_without_an_instance_it_falls_back_to_the_timer(self):
+        with (
+            mock.patch.dict(os.environ, {}, clear=True),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.assertIsNone(hypr.open_event_stream())
+        self.assertIn("saving on a timer instead", err.getvalue())
+
+    def test_a_missing_socket_falls_back_to_the_timer(self):
+        environ = {"HYPRLAND_INSTANCE_SIGNATURE": "nosuchsession", "XDG_RUNTIME_DIR": "/nonexistent"}
+        with (
+            mock.patch.dict(os.environ, environ, clear=True),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.assertIsNone(hypr.open_event_stream())
+        self.assertIn("saving on a timer instead", err.getvalue())
+
+    def test_without_a_stream_the_wait_is_a_plain_sleep(self):
+        with mock.patch.object(time, "sleep") as slept:
+            self.assertTrue(hypr.wait_for_placement_change(None, 42))
+        slept.assert_called_once_with(42)
+
+
+class Layout(unittest.TestCase):
+    def test_placement_without_titles_keyed_by_address(self):
+        clients = [
+            {
+                "address": "0x1",
+                "class": "code",
+                "mapped": True,
+                "title": "drifts",
+                "focusHistoryID": 3,
+                "workspace": {"id": 2},
+                "at": [0, 0],
+                "size": [1, 1],
+                "floating": False,
+                "pinned": False,
+                "fullscreen": 0,
+                "monitor": 0,
+                "grouped": [],
+            }
+        ]
+        with mock.patch.object(hypr, "query", return_value=clients):
+            layout = hypr.get_layout()
+        self.assertEqual(list(layout), ["0x1"])
+        self.assertNotIn("title", layout["0x1"])
+        self.assertNotIn("focusHistoryID", layout["0x1"])
+        self.assertEqual(layout["0x1"]["workspace"], {"id": 2})
 
 
 class ManagedClients(unittest.TestCase):

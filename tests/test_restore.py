@@ -3,13 +3,15 @@ rebuilding, monitor placement, and the Lua the compositor receives."""
 
 import io
 import itertools
+import os
+import shlex
 import sys
 import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import config, hypr, proc, restore
-from tests.helpers import StateDirCase, live_window, saved_window
+from omarchy_last_session import chromium, config, hypr, proc, restore
+from tests.helpers import StateDirCase, live_window, pretend_runnable, saved_window
 
 
 class ExecRules(unittest.TestCase):
@@ -51,14 +53,19 @@ class RestoreHarness(StateDirCase):
     def setUp(self):
         super().setUp()
         self.patch(time, "sleep", mock.Mock())
-        # restore reports what it could not do; a test that cares about a
-        # report captures stderr itself, the rest keep it out of the run
+        # restore reports what it did on stdout and what it could not do on
+        # stderr; a test that cares captures them itself, the rest keep both
+        # out of the run
+        self.patch(sys, "stdout", io.StringIO())
         self.patch(sys, "stderr", io.StringIO())
         # one monitor by default: the placement pass stays a no-op
         self.patch(hypr, "query", mock.Mock(return_value=[]))
+        # never touch a real browser profile
+        self.patch(chromium, "mark_clean_exit", mock.Mock(return_value=0))
 
     def run_restore(self, clients_sequence, sweep_timeout=0):
-        """Every line of Lua restore sent, dispatched or evaluated.
+        """Every line of Lua restore sent, dispatched or evaluated, and each
+        browser profile it marked as cleanly exited, in order.
 
         The sweep polls until it runs out of time, so the clock is faked (one
         second per reading) and the last client view repeats forever. Without
@@ -77,6 +84,11 @@ class RestoreHarness(StateDirCase):
             mock.patch.object(hypr, "get_managed_clients", side_effect=next_view),
             mock.patch.object(hypr, "dispatch", side_effect=sent.append),
             mock.patch.object(hypr, "eval_lua", side_effect=sent.append),
+            mock.patch.object(
+                chromium,
+                "mark_clean_exit",
+                side_effect=lambda cls, cmd: sent.append(f"mark_clean_exit {cls} {cmd}"),
+            ),
         ):
             restore.restore_session()
         return sent
@@ -120,7 +132,7 @@ class RestoreSpawning(RestoreHarness):
         self.write_session(
             [saved_window("brave-browser", spawn=True), saved_window("brave-browser", spawn=False)]
         )
-        self.assertEqual(len(self.run_restore([{}])), 1)
+        self.assertEqual(len([e for e in self.run_restore([{}]) if "exec_cmd" in e]), 1)
 
     def test_tiled_windows_spawn_before_floating(self):
         self.write_session(
@@ -202,6 +214,121 @@ class RestoreSweep(RestoreHarness):
         self.assertTrue(any("window.move" in e and "0xb" in e for e in emitted))
 
 
+class BrowserRelaunch(RestoreHarness):
+    """Chromium refuses to restore its session after an unclean exit, and a
+    browser the power menu killed has recorded one, so its profiles are marked
+    as cleanly exited before it is launched."""
+
+    def test_a_browser_is_marked_cleanly_exited_before_its_launch(self):
+        self.write_session([saved_window("brave-browser", cmd="/opt/brave-bin/brave --restore-last-session")])
+        emitted = self.run_restore([{}])
+        self.assertEqual(
+            emitted[0], "mark_clean_exit brave-browser /opt/brave-bin/brave --restore-last-session"
+        )
+        self.assertIn("exec_cmd", emitted[1])
+
+    def test_a_browser_already_running_is_left_alone(self):
+        """Its profile is in use, and the launch only adds a window to it."""
+        self.write_session([saved_window("brave-browser")])
+        already = {"0xb": {"class": "brave-browser", "workspace": {"id": 1}, "at": [0, 0], "floating": False}}
+        emitted = self.run_restore([already, already])
+        self.assertFalse(any(e.startswith("mark_clean_exit") for e in emitted))
+
+    def test_other_apps_are_not_marked(self):
+        self.write_session([saved_window("code"), saved_window("foot")])
+        self.assertFalse(any(e.startswith("mark_clean_exit") for e in self.run_restore([{}])))
+
+    def test_one_browser_process_is_marked_once(self):
+        self.write_session(
+            [saved_window("brave-browser", ws=1), saved_window("brave-browser", ws=2, spawn=False)]
+        )
+        marks = [e for e in self.run_restore([{}]) if e.startswith("mark_clean_exit")]
+        self.assertEqual(len(marks), 1)
+
+
+class SweepWaitsForTitles(RestoreHarness):
+    """A browser window first shows up titled Untitled, New Tab or about:blank.
+    Pairing it then would go by the app name alone, so the sweep gives it a
+    moment to say what it shows."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(config, "TITLE_SETTLE", 3)
+
+    def brave(self, title, ws=2):
+        return {
+            "class": "brave-browser",
+            "workspace": {"id": ws},
+            "title": title,
+            "at": [0, 0],
+            "floating": False,
+        }
+
+    def test_a_loading_window_is_paired_once_its_title_arrives(self):
+        self.write_session(
+            [
+                dict(saved_window("brave-browser", ws=1), title="Trade BTCUSDT - Brave"),
+                dict(saved_window("brave-browser", ws=3), title="about:blank - Brave"),
+            ]
+        )
+        loading = {"0xb": self.brave("Untitled - Brave")}
+        loaded = {"0xb": self.brave("Trade BTCUSDT - Brave")}
+        emitted = self.run_restore([{}, loading, loaded], sweep_timeout=10)
+        moves = [e for e in emitted if "window.move" in e and "0xb" in e]
+        self.assertEqual(len(moves), 1)
+        self.assertIn("workspace = '1'", moves[0])
+
+    def test_a_window_that_stays_blank_is_paired_after_the_wait(self):
+        self.write_session([dict(saved_window("brave-browser", ws=3), title="about:blank - Brave")])
+        emitted = self.run_restore([{}, {"0xb": self.brave("about:blank - Brave")}], sweep_timeout=10)
+        self.assertTrue(any("window.move" in e and "0xb" in e and "workspace = '3'" in e for e in emitted))
+
+    def test_the_wait_ends_with_the_sweep(self):
+        """A window still loading when time runs out is placed by what it has."""
+        self.patch(config, "TITLE_SETTLE", 100)
+        self.write_session([dict(saved_window("brave-browser", ws=3), title="Trade - Brave")])
+        emitted = self.run_restore([{}, {"0xb": self.brave("Untitled - Brave")}], sweep_timeout=5)
+        self.assertTrue(any("window.move" in e and "0xb" in e for e in emitted))
+
+
+class RestoreKeepsACopy(RestoreHarness):
+    """session.json is overwritten soon after login, so the copy is what
+    answers what restore tried to bring back."""
+
+    def test_the_snapshot_restore_used_is_kept(self):
+        self.write_session([saved_window("code")])
+        self.run_restore([{}])
+        with open(self.session) as a, open(self.restored) as b:
+            self.assertEqual(a.read(), b.read())
+
+    def test_an_aborted_restore_keeps_nothing(self):
+        self.write_session([saved_window("code")])
+        busy = {f"0x{i}": {"class": "x", "workspace": {"id": 1}} for i in range(4)}
+        self.run_restore([busy])
+        self.assertFalse(os.path.exists(self.restored))
+
+
+class PairingIsLogged(RestoreHarness):
+    """On stdout: it is an account of what was done, and stderr stays empty
+    for a restore where nothing went wrong."""
+
+    def test_each_placement_names_both_windows(self):
+        self.write_session([dict(saved_window("brave-browser", ws=4), title="Trade - Brave")])
+        landed = {
+            "0xaa": {"class": "brave-browser", "workspace": {"id": 1}, "title": "Trade - Brave", "at": [0, 0]}
+        }
+        with (
+            mock.patch.object(sys, "stdout", io.StringIO()) as out,
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.run_restore([{}, landed], sweep_timeout=5)
+        line = next(line for line in out.getvalue().splitlines() if "is the saved" in line)
+        self.assertIn("brave-browser 'Trade - Brave' on workspace 1", line)
+        self.assertIn("from workspace 4", line)
+        self.assertIn("placing it", line)
+        self.assertEqual(err.getvalue(), "")
+
+
 class ExcludedAtRestore(RestoreHarness):
     def test_excluded_class_in_the_snapshot_is_not_launched(self):
         """The exclusion list can grow after the snapshot was taken, and an
@@ -272,6 +399,11 @@ class PairAmongWindowsOfOneClass(unittest.TestCase):
     BYBIT = "▼ 78087.8 | Trade BTCUSDT | Bybit Perpetual"
     KOBEISSI = 'The Kobeissi Letter on X: "BREAKING"'
 
+    def setUp(self):
+        patcher = mock.patch.object(proc, "read_cmdline", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def client(self, title, ws=2, cls="brave-browser"):
         return {
             "class": cls,
@@ -313,6 +445,103 @@ class PairAmongWindowsOfOneClass(unittest.TestCase):
         other = dict(saved_window("code", ws=2), title="omarchy-last-session - Code")
         landed = self.client("STUDY-PLAN.md - projects (Workspace)", ws=2, cls="code")
         self.assertIs(restore.match_saved_entry([study, other], landed), study)
+
+
+class TitleLikeness(unittest.TestCase):
+    """Browsers append their own name to every title, and title a window
+    Untitled, New Tab or about:blank until its page has loaded. Neither may
+    count as likeness, or a window still loading pairs with whichever saved
+    entry has the least in its title."""
+
+    BYBIT = "▲ 78000.5 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
+    BLANK = "about:blank - Brave"
+
+    def test_a_loading_title_scores_nothing_against_anything(self):
+        for live in ("Untitled - Brave", "New Tab - Brave", "about:blank - Brave", "Brave"):
+            with self.subTest(live=live):
+                self.assertEqual(restore.score_title_likeness(self.BYBIT, live), 0.0)
+                self.assertEqual(restore.score_title_likeness(self.BLANK, live), 0.0)
+
+    def test_a_saved_placeholder_scores_nothing_too(self):
+        self.assertEqual(restore.score_title_likeness(self.BLANK, "Example Domain - Brave"), 0.0)
+
+    def test_the_app_name_does_not_count(self):
+        """Two unrelated pages share ' - Brave'; the pages alone decide."""
+        self.assertLess(restore.score_title_likeness("Home / X - Brave", "Example Domain - Brave"), 0.3)
+
+    def test_a_drifted_page_title_still_matches(self):
+        drifted = "▼ 80697.5 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
+        self.assertGreater(restore.score_title_likeness(self.BYBIT, drifted), 0.9)
+
+    def test_titles_without_an_app_name_compare_whole(self):
+        self.assertEqual(restore.score_title_likeness("alex@host:~", "alex@host:~"), 1.0)
+        self.assertEqual(restore.score_title_likeness("", "anything"), 0.0)
+
+    def test_a_loading_title_is_recognised(self):
+        for title in ("Untitled - Brave", "New Tab - Brave", "about:blank - Brave"):
+            self.assertTrue(restore.is_still_loading(title), title)
+        for title in ("Trade - Brave", "alex@host:~", "", "Mines"):
+            self.assertFalse(restore.is_still_loading(title), title)
+
+
+class CommandMatch(unittest.TestCase):
+    BRAVE = "/opt/brave-bin/brave --ozone-platform=wayland --restore-last-session"
+
+    def test_the_same_command_line_is_an_exact_match(self):
+        argv = ["/opt/brave-bin/brave", "--ozone-platform=wayland", "--restore-last-session"]
+        self.assertEqual(restore.score_command_match(self.BRAVE, argv), 2)
+
+    def test_the_restore_flag_is_ignored(self):
+        """A browser launched by something else lacks the plugin's flag."""
+        argv = ["/opt/brave-bin/brave", "--ozone-platform=wayland"]
+        self.assertEqual(restore.score_command_match(self.BRAVE, argv), 2)
+
+    def test_another_profile_is_another_command(self):
+        argv = ["/opt/brave-bin/brave", "--ozone-platform=wayland", "--user-data-dir=/x"]
+        self.assertEqual(restore.score_command_match(self.BRAVE, argv), 1)
+
+    def test_a_desktop_entry_command_matches_the_program(self):
+        self.assertEqual(restore.score_command_match("gnome-mines", ["/usr/bin/gnome-mines"]), 1)
+
+    def test_another_program_does_not_match(self):
+        self.assertEqual(restore.score_command_match(self.BRAVE, ["/opt/zen/zen"]), 0)
+
+    def test_nothing_known_scores_nothing(self):
+        self.assertEqual(restore.score_command_match(self.BRAVE, []), 0)
+        self.assertEqual(restore.score_command_match("", ["x"]), 0)
+
+
+class PairAcrossProcesses(unittest.TestCase):
+    """Two Brave processes on different profiles share a class. The reported
+    bug: a window of the everyday browser, seen before its page had loaded,
+    was paired with an automation browser's about:blank entry and sent to
+    that entry's workspace."""
+
+    DEFAULT = "/opt/brave-bin/brave --ozone-platform=wayland --restore-last-session"
+    JOBBOT = (
+        "/opt/brave-bin/brave --ozone-platform=wayland --user-data-dir=/home/alex/p --restore-last-session"
+    )
+
+    def setUp(self):
+        bybit = "▲ 78000.5 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
+        self.bybit = dict(saved_window("brave-browser", ws=1, cmd=self.DEFAULT), title=bybit)
+        self.blank = dict(saved_window("brave-browser", ws=3, cmd=self.JOBBOT), title="about:blank - Brave")
+
+    def pair(self, title, ws, argv):
+        client = {"class": "brave-browser", "workspace": {"id": ws}, "pid": 7, "title": title, "at": [0, 0]}
+        with mock.patch.object(proc, "read_cmdline", return_value=argv):
+            return restore.match_saved_entry([self.bybit, self.blank], client)
+
+    def test_a_loading_window_is_not_given_to_the_other_process(self):
+        self.assertIs(self.pair("Untitled - Brave", 3, shlex.split(self.DEFAULT)), self.bybit)
+
+    def test_the_other_process_gets_its_own_entry(self):
+        self.assertIs(self.pair("about:blank - Brave", 1, shlex.split(self.JOBBOT)), self.blank)
+
+    def test_a_flattened_command_line_is_read_back(self):
+        """Chromium reports its argv as one string."""
+        with pretend_runnable():
+            self.assertIs(self.pair("Untitled - Brave", 3, [self.DEFAULT]), self.bybit)
 
 
 class PlaceWindow(unittest.TestCase):

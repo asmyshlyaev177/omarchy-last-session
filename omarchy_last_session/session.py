@@ -2,22 +2,55 @@
 
 import json
 import os
+import shutil
 import signal
 import time
 
-from omarchy_last_session import config, hypr, proc, relaunch
+from omarchy_last_session import config, hypr, proc, relaunch, warn
 
 
-def save_session(keep_previous_when_empty=True):
-    """Snapshot every mapped window. Returns how many were saved, or None when
-    nothing is open and the previous snapshot was kept: the power menu closes
-    every window before powering off, and a daemon tick in that gap must not
-    blank the snapshot it just took."""
+def save_session():
+    """Snapshot every mapped window; returns how many."""
     windows = snapshot_windows()
-    if not windows and keep_previous_when_empty and os.path.exists(config.SESSION_FILE):
-        return None
     write_session(windows)
     return len(windows)
+
+
+class SaveScheduler:
+    """When the daemon writes. At once when windows appear or move. Only after
+    the desktop has been still for SETTLE_DELAY when windows vanish, so the
+    power menu closing every window before a poweroff is never snapshotted
+    half done. And at least every SAVE_INTERVAL, for titles and floating
+    geometry, which change without a window coming or going."""
+
+    def __init__(self):
+        self.saved = None
+        self.saved_at = 0.0
+        self.current = None
+        self.still_since = 0.0
+
+    def is_due(self, layout, now):
+        if layout != self.current:
+            self.current, self.still_since = layout, now
+        if self.saved is None:
+            return True
+        only_vanished = set(layout) < set(self.saved)
+        if layout != self.saved and not only_vanished:
+            return True
+        if now - self.still_since < config.SETTLE_DELAY:
+            return False
+        return layout != self.saved or now - self.saved_at >= config.SAVE_INTERVAL
+
+    def mark_saved(self, now):
+        self.saved, self.saved_at = self.current, now
+
+    def seconds_until_recheck(self, now):
+        """How long the daemon may sleep if nothing happens: until vanished
+        windows stop being provisional, or until the periodic save."""
+        deadlines = [self.saved_at + config.SAVE_INTERVAL]
+        if self.current != self.saved:
+            deadlines.append(self.still_since + config.SETTLE_DELAY)
+        return max(0.0, min(deadlines) - now)
 
 
 def snapshot_windows():
@@ -77,6 +110,15 @@ def write_session(windows):
     with open(tmp, "w") as f:
         json.dump({"saved_at": time.time(), "windows": windows}, f, indent=2)
     os.replace(tmp, config.SESSION_FILE)
+
+
+def keep_restore_copy():
+    """What restore is about to bring back, kept where the daemon will not
+    overwrite it."""
+    try:
+        shutil.copyfile(config.SESSION_FILE, config.LAST_RESTORE_FILE)
+    except OSError as e:
+        warn(f"could not keep a copy of the restored session: {e}")
 
 
 def load_session():

@@ -7,25 +7,11 @@ from omarchy_last_session import config, hypr, proc, session
 from tests.helpers import BRAVE_BLOB, StateDirCase, client, grouped_clients, pretend_runnable
 
 
-class SaveGuard(StateDirCase):
-    """omarchy closes every window before poweroff; a daemon tick landing in
-    that gap must not blank the snapshot the power menu just took."""
-
-    def test_empty_save_keeps_existing_session(self):
+class Save(StateDirCase):
+    def test_an_empty_desktop_is_saved_as_empty(self):
+        """Guarding against the power menu's close-all is the daemon's job."""
         self.write_session([{"class": "code"}])
-        self.assertIsNone(self.save_with([]))
-        self.assertEqual(len(self.read_session()), 1)
-
-    def test_empty_save_writes_when_no_session_yet(self):
         self.assertEqual(self.save_with([]), 0)
-        self.assertEqual(self.read_session(), [])
-
-    def test_empty_save_can_be_told_to_record_it(self):
-        """The power menu runs shutdown before anything is closed, so an empty
-        desktop at that point is what the user left."""
-        self.write_session([{"class": "code"}])
-        with mock.patch.object(hypr, "query", return_value=[]):
-            self.assertEqual(session.save_session(keep_previous_when_empty=False), 0)
         self.assertEqual(self.read_session(), [])
 
     def test_second_window_of_one_process_is_not_respawned(self):
@@ -122,6 +108,89 @@ class MonitorCapture(StateDirCase):
     def test_unknown_monitor_id_records_an_empty_name(self):
         saved = self.save_with_monitors([client("code", monitor=9)], [{"id": 0, "name": "eDP-1"}])
         self.assertEqual(saved["monitor_name"], "")
+
+
+class SaveSchedule(unittest.TestCase):
+    """The daemon polls the desktop; this decides which polls write."""
+
+    A = {"0xa": {"class": "code", "workspace": {"id": 1}}}
+    AB = {"0xa": {"class": "code", "workspace": {"id": 1}}, "0xb": {"class": "foot", "workspace": {"id": 2}}}
+
+    def setUp(self):
+        self.scheduler = session.SaveScheduler()
+        for name, value in (("SETTLE_DELAY", 10), ("SAVE_INTERVAL", 60)):
+            patcher = mock.patch.object(config, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def observe(self, layout, now):
+        due = self.scheduler.is_due(layout, now)
+        if due:
+            self.scheduler.mark_saved(now)
+        return due
+
+    def test_the_first_look_is_saved(self):
+        self.assertTrue(self.observe(self.A, 0))
+
+    def test_nothing_changed_is_not_saved(self):
+        self.observe(self.A, 0)
+        self.assertFalse(self.observe(self.A, 5))
+
+    def test_a_new_window_is_saved_at_once(self):
+        self.observe(self.A, 0)
+        self.assertTrue(self.observe(self.AB, 5))
+
+    def test_a_moved_window_is_saved_at_once(self):
+        self.observe(self.A, 0)
+        self.assertTrue(self.observe({"0xa": {"class": "code", "workspace": {"id": 3}}}, 5))
+
+    def test_vanished_windows_wait_until_the_desktop_has_been_still(self):
+        """The power menu closes every window two seconds before the poweroff;
+        a poll landing in that gap must not write the half-closed desktop."""
+        self.observe(self.AB, 0)
+        self.assertFalse(self.observe(self.A, 5))
+        self.assertFalse(self.observe(self.A, 10))
+        self.assertTrue(self.observe(self.A, 15))
+
+    def test_a_desktop_closed_down_entirely_is_saved_once_it_is_still(self):
+        self.observe(self.AB, 0)
+        self.assertFalse(self.observe({}, 5))
+        self.assertTrue(self.observe({}, 16))
+
+    def test_the_wait_restarts_when_the_desktop_changes_again(self):
+        self.observe(self.AB, 0)
+        self.assertFalse(self.observe(self.A, 5))
+        self.assertFalse(self.observe({}, 12))
+        self.assertFalse(self.observe({}, 20))
+        self.assertTrue(self.observe({}, 23))
+
+    def test_a_periodic_save_catches_what_the_layout_does_not_show(self):
+        """Titles and floating geometry change without a window coming or going."""
+        self.observe(self.A, 0)
+        self.assertFalse(self.observe(self.A, 55))
+        self.assertTrue(self.observe(self.A, 60))
+
+    def test_a_failed_save_is_tried_again_on_the_next_look(self):
+        self.assertTrue(self.scheduler.is_due(self.A, 0))
+        self.assertTrue(self.scheduler.is_due(self.A, 5))
+
+    def test_an_unchanged_desktop_sleeps_until_the_periodic_save(self):
+        self.observe(self.A, 0)
+        self.assertEqual(self.scheduler.seconds_until_recheck(0), 60)
+        self.scheduler.is_due(self.A, 20)
+        self.assertEqual(self.scheduler.seconds_until_recheck(20), 40)
+
+    def test_vanished_windows_shorten_the_sleep_to_their_settle(self):
+        """The daemon has to come back for them; no event will say they are
+        still gone."""
+        self.observe(self.AB, 0)
+        self.assertFalse(self.observe(self.A, 5))
+        self.assertEqual(self.scheduler.seconds_until_recheck(5), 10)
+        self.assertEqual(self.scheduler.seconds_until_recheck(12), 3)
+
+    def test_the_sleep_never_goes_negative(self):
+        self.observe(self.A, 0)
+        self.assertEqual(self.scheduler.seconds_until_recheck(999), 0)
 
 
 class QuitSessionKeepingApps(unittest.TestCase):

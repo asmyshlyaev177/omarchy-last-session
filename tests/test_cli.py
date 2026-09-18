@@ -1,6 +1,8 @@
 import io
+import itertools
 import os
 import sys
+import time
 import unittest
 from unittest import mock
 
@@ -37,11 +39,59 @@ class Shutdown(StateDirCase):
 
     def test_an_empty_desktop_at_shutdown_is_recorded_as_such(self):
         """Everything was closed before the power menu ran, so nothing should
-        come back. The daemon's minute-old snapshot used to be kept instead."""
+        come back."""
         self.write_session([{"class": "code"}])
         self.assertEqual(self.run_shutdown([]), 0)
         self.assertEqual(self.read_session(), [])
         self.assertEqual(self.read_session(self.copy), [])
+
+
+class Daemon(unittest.TestCase):
+    """The loop sleeps on the event stream, looks at the desktop each time it
+    wakes, and stops when the compositor goes away."""
+
+    A = {"0xa": {"class": "code"}}
+    AB = {"0xa": {"class": "code"}, "0xb": {"class": "foot"}}
+
+    def run_wakes(self, layouts, save=None):
+        """One wake per layout, then the compositor goes. Returns the saves
+        made, the sleep the loop asked for each time, and stderr."""
+        waits = []
+
+        def wait(stream, timeout):
+            waits.append(timeout)
+            return len(waits) < len(layouts)
+
+        with (
+            mock.patch.object(time, "sleep"),
+            mock.patch.object(time, "monotonic", side_effect=itertools.count(1000, 5)),
+            mock.patch.object(hypr, "open_event_stream", return_value="stream"),
+            mock.patch.object(hypr, "wait_for_placement_change", side_effect=wait),
+            mock.patch.object(hypr, "get_layout", side_effect=layouts),
+            mock.patch.object(session, "save_session", side_effect=save or itertools.count(1)) as saved,
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            cli.run_daemon()
+        return saved.call_count, waits, err.getvalue()
+
+    def test_saves_on_the_first_look_and_then_only_on_a_change(self):
+        saves, _, _ = self.run_wakes([self.A, self.A, self.AB])
+        self.assertEqual(saves, 2)
+
+    def test_it_waits_for_the_compositor_rather_than_looking_on_a_timer(self):
+        _, waits, _ = self.run_wakes([self.A, self.A])
+        self.assertEqual(len(waits), 2)
+        self.assertTrue(all(wait > 0 for wait in waits), waits)
+
+    def test_it_stops_when_the_compositor_goes_away(self):
+        """Its windows are closing; saving now would record a teardown."""
+        saves, waits, _ = self.run_wakes([self.A])
+        self.assertEqual((saves, len(waits)), (1, 1))
+
+    def test_a_failed_save_is_reported_and_tried_again(self):
+        saves, _, err = self.run_wakes([self.A, self.A], save=[OSError("disk full"), 1])
+        self.assertEqual(saves, 2)
+        self.assertIn("save failed: disk full", err)
 
 
 class Usage(unittest.TestCase):

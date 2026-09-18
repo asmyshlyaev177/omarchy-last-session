@@ -25,6 +25,7 @@ Item {
   Process {
     id: restore
     command: [root.script, "restore"]
+    stdout: SplitParser { onRead: data => console.log(data) }
     stderr: SplitParser { onRead: data => console.warn(data) }
     onExited: daemon.running = true
   }
@@ -32,6 +33,7 @@ Item {
   Process {
     id: daemon
     command: [root.script, "daemon"]
+    stdout: SplitParser { onRead: data => console.log(data) }
     stderr: SplitParser { onRead: data => console.warn(data) }
   }
 }
