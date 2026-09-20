@@ -31,6 +31,8 @@ LIVE = os.environ.get("OLS_LIVE_TESTS") == "1" and all(
     shutil.which(binary) for binary in ("Hyprland", "labwc", "foot")
 )
 MONITORS = ("MON-A", "MON-B")
+# Kitty appends its pid, so every instance answers on its own socket.
+KITTY_SOCKET = "olskitty"
 
 
 def wait_for(probe, what, timeout=20, log=lambda: ""):
@@ -187,6 +189,18 @@ class Compositor:
     def open_window(self, cmd):
         return self.open_windows(cmd)[0]
 
+    def kitten(self, pid, *args, check=True):
+        """One remote control request to the kitty running as `pid`. A kitty
+        that is still starting has no socket yet, so a caller that is waiting
+        for one asks with check=False."""
+        address = "unix:@{}-{}".format(KITTY_SOCKET, pid)
+        done = subprocess.run(
+            ["kitten", "@", "--to", address, *args], env=self.env, capture_output=True, text=True, timeout=30
+        )
+        if check and done.returncode != 0:
+            raise AssertionError("kitten {} failed: {}{}".format(" ".join(args), done.stdout, done.stderr))
+        return done.stdout if done.returncode == 0 else ""
+
     def run_script(self, action, state_dir):
         env = dict(
             self.env,
@@ -241,6 +255,29 @@ def tabs_by_monitor(session):
         for w in session["windows"]
         if app_name(w["class"]) == "chromium"
     }
+
+
+def kitty_shape(listing):
+    """Every OS window, tab and split of a kitty instance, with each pane named
+    by its working directory so two instances compare."""
+    return [
+        [
+            (tab["title"], tab["layout"], name_panes((tab.get("layout_state") or {}).get("pairs"), tab))
+            for tab in os_window["tabs"]
+        ]
+        for os_window in json.loads(listing)
+    ]
+
+
+def name_panes(node, tab):
+    """The split tree, with pane ids replaced by the directory each pane is in:
+    ids are assigned in the order panes open and say nothing across restarts."""
+    cwds = {window["id"]: window["cwd"] for window in tab["windows"]}
+    if node is None or isinstance(node, int):
+        return cwds.get(node)
+    named = {side: name_panes(node[side], tab) for side in ("one", "two") if side in node}
+    named["side_by_side"] = node.get("horizontal", True)
+    return named
 
 
 def app_name(cls):
@@ -343,6 +380,14 @@ class LiveRestore(unittest.TestCase):
         os.makedirs(apps, exist_ok=True)
         with open(os.path.join(apps, name), "w") as f:
             f.write(f"[Desktop Entry]\nExec={exec_line}\n")
+
+    def write_kitty_config(self):
+        """Remote control is what lets a kitty describe its own tabs and
+        splits; it is off until the user turns it on, as it is on a desktop."""
+        path = os.path.join(self.comp.home, ".config", "kitty", "kitty.conf")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("allow_remote_control socket-only\nlisten_on unix:@{}\n".format(KITTY_SOCKET))
 
     def snapshot(self, action, name):
         state = os.path.join(self.work, name)
@@ -489,6 +534,39 @@ class LiveRestore(unittest.TestCase):
         with self.subTest("tiled again, and back in its group"):
             self.assertEqual(shape(after), shape(saved), c.requests())
             self.assertEqual(group_shapes(after), group_shapes(saved), c.requests())
+
+    def test_a_terminal_comes_back_with_its_tabs_and_splits(self):
+        """A kitty with remote control on describes its own instance, so the
+        snapshot holds every tab, split and working directory of it. One launch
+        replays the lot, which is why the second window is not launched again."""
+        c = self.comp
+        c.boot(MONITORS)
+        self.write_kitty_config()
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        pid = c.open_window("kitty")["pid"]
+        c.kitten(pid, "launch", "--type=window", "--location=vsplit", "--cwd=/usr")
+        c.kitten(pid, "launch", "--type=window", "--location=hsplit", "--cwd=/var")
+        c.kitten(pid, "launch", "--type=tab", "--tab-title=logs", "--cwd=/etc")
+        before = kitty_shape(c.kitten(pid, "ls"))
+        self.assertEqual(len(before[0]), 2, before)
+
+        saved = self.snapshot("shutdown", "state")
+        kitty_windows = [w for w in saved["windows"] if w["class"] == "kitty"]
+        self.assertEqual(len(kitty_windows), 1, saved["windows"])
+        self.assertIn("--session", kitty_windows[0]["cmd"])
+
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        live = wait_for(
+            lambda: [w for w in c.clients() if w["class"] == "kitty"], "kitty to come back", log=c.requests
+        )
+        self.assertEqual(len(live), 1, live)
+        listing = wait_for(
+            lambda: c.kitten(live[0]["pid"], "ls", check=False), "the restored kitty to describe itself"
+        )
+        self.assertEqual(kitty_shape(listing), before, c.requests())
 
     def test_a_session_from_two_monitors_comes_back_on_one(self):
         """Undocked between logins. The second monitor's windows have nowhere

@@ -15,6 +15,11 @@ LAST_SHUTDOWN_FILE = os.path.join(STATE_DIR, "last-shutdown.json")
 # What restore brought back, kept because the daemon overwrites session.json
 # soon after login.
 LAST_RESTORE_FILE = os.path.join(STATE_DIR, "last-restore.json")
+# One per running kitty instance: its OS windows, tabs, splits and working
+# directories, replayed by `kitty --session`. Written only for a kitty whose
+# remote control is on, and rewritten on every save.
+KITTY_SESSION_FILE = os.path.join(STATE_DIR, "kitty-{pid}.session")
+KITTY_SESSION_GLOB = os.path.join(STATE_DIR, "kitty-*.session")
 
 # Never saved or restored: add whatever your autostart already launches.
 EXCLUDE_CLASSES = {"org.quickshell", "xembedsniproxy"}
@@ -32,6 +37,12 @@ TERMINALS = {
 }
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
+KITTY_CLASS = "kitty"
+# yazi writes its directory into a file named per run; replaying that argument
+# would point the new instance at a file that is gone.
+CWD_FILE_FLAG = "--cwd-file"
+# Hands kitty a whole instance: every OS window of it comes back from one launch.
+KITTY_SESSION_FLAG = "--session"
 
 # An AppImage mounts under a fresh random suffix on every launch.
 APPIMAGE_MOUNT_PREFIX = "/tmp/.mount_"

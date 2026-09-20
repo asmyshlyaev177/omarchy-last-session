@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import config, hypr, proc, session
+from omarchy_last_session import config, hypr, kitty, proc, session
 from tests.helpers import (
     BRAVE_BLOB,
     StateDirCase,
@@ -214,6 +214,74 @@ class PrivateState(StateDirCase):
         with self.assertRaises(TypeError):
             session.write_private(self.session, b"not text")
         self.assertEqual(os.listdir(self.state), [])
+
+
+class KittySessions(StateDirCase):
+    """A kitty that describes itself is relaunched from a session file holding
+    its whole instance: every OS window, tab, split and working directory. The
+    one launch brings all of them back, so the others are not launched again."""
+
+    TEXT = "new_tab\nlayout splits\nlaunch --cwd=/srv\n"
+
+    def save_kitty(self, clients, text=TEXT):
+        with mock.patch.object(kitty, "build_session_text", return_value=text):
+            self.save_with(clients)
+        return self.read_session()
+
+    def path_for(self, pid):
+        return os.path.join(self.dir.name, f"kitty-{pid}.session")
+
+    def test_the_session_file_is_written_and_named_in_the_command(self):
+        saved = self.save_kitty([client("kitty", pid=7)])
+        self.assertEqual(saved[0]["cmd"], f"kitty --session {self.path_for(7)}")
+        with open(self.path_for(7)) as f:
+            self.assertEqual(f.read(), self.TEXT)
+
+    def test_the_session_file_is_readable_by_this_user_only(self):
+        """It holds every directory the user had open, as the snapshot does."""
+        self.addCleanup(os.umask, os.umask(0o000))
+        self.save_kitty([client("kitty", pid=7)])
+        self.assertEqual(mode_of(self.path_for(7)), 0o600)
+
+    def test_a_second_window_of_one_kitty_is_not_launched_again(self):
+        two = [client("kitty", pid=7), client("kitty", pid=7)]
+        self.assertEqual([w["spawn"] for w in self.save_kitty(two)], [True, False])
+
+    def test_each_kitty_instance_is_launched_on_its_own(self):
+        two = [client("kitty", pid=7), client("kitty", pid=8)]
+        saved = self.save_kitty(two)
+        self.assertEqual([w["spawn"] for w in saved], [True, True])
+        self.assertEqual(
+            [w["cmd"] for w in saved],
+            [f"kitty --session {self.path_for(7)}", f"kitty --session {self.path_for(8)}"],
+        )
+
+    def test_a_kitty_that_does_not_answer_keeps_a_launch_per_window(self):
+        """Remote control is off: there is no session file, so a second window
+        still has to be opened by a second launch."""
+        two = [client("kitty", pid=7), client("kitty", pid=7)]
+        with (
+            mock.patch.object(proc, "find_descendant", return_value=None),
+            mock.patch.object(proc, "read_cwd", return_value="/srv"),
+        ):
+            saved = self.save_kitty(two, text=None)
+        self.assertEqual([w["spawn"] for w in saved], [True, True])
+        self.assertEqual(saved[0]["cmd"], "kitty -d /srv")
+        self.assertEqual(os.listdir(self.dir.name), ["session.json"])
+
+    def test_files_of_instances_that_are_gone_are_dropped(self):
+        """One file per kitty running now, however many logins came before."""
+        stale = self.path_for(999)
+        with open(stale, "w") as f:
+            f.write("old\n")
+        self.save_kitty([client("kitty", pid=7)])
+        self.assertFalse(os.path.exists(stale))
+        self.assertTrue(os.path.exists(self.path_for(7)))
+
+    def test_another_terminal_is_left_alone(self):
+        with mock.patch.object(kitty, "build_session_text") as read:
+            self.save_with([client("com.mitchellh.ghostty", pid=7)])
+        read.assert_not_called()
 
 
 class SaveSchedule(unittest.TestCase):

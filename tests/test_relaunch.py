@@ -144,6 +144,25 @@ class RelaunchCommand(DesktopDirCase):
         with mock.patch.object(proc, "read_cmdline", return_value=["./steamwebhelper", "-nocrashdialog"]):
             self.assertEqual(relaunch.build_relaunch_command(client("steam")), "/usr/bin/steam")
 
+    def test_kitty_with_a_session_replays_the_whole_instance(self):
+        """Its tabs and splits are in the file, so the relaunch points at it
+        instead of opening one bare window in a directory."""
+        cmd = relaunch.build_relaunch_command(client("kitty"), "/state/kitty-7.session")
+        self.assertEqual(cmd, "kitty --session /state/kitty-7.session")
+
+    def test_a_session_path_with_a_space_is_quoted(self):
+        cmd = relaunch.build_relaunch_command(client("kitty"), "/my state/kitty-7.session")
+        self.assertEqual(cmd, "kitty --session '/my state/kitty-7.session'")
+
+    def test_kitty_without_a_session_reopens_in_its_directory(self):
+        """Remote control is off, so there is nothing to replay and the
+        terminal comes back the way every other terminal does."""
+        with (
+            mock.patch.object(proc, "find_descendant", return_value=None),
+            mock.patch.object(proc, "read_cwd", return_value="/srv"),
+        ):
+            self.assertEqual(relaunch.build_relaunch_command(client("kitty")), "kitty -d /srv")
+
     def test_brave_is_unflattened_and_gets_restore_flag(self):
         with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=[BRAVE_BLOB]):
             cmd = relaunch.build_relaunch_command(client("brave-browser"))

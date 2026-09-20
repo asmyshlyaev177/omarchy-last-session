@@ -20,6 +20,17 @@ def read_cwd(pid):
         return None
 
 
+def read_environ(pid):
+    """Environment a process was started with; empty for one that is gone."""
+    try:
+        with open(f"/proc/{pid}/environ", "rb") as f:
+            raw = f.read()
+    except OSError:
+        return {}
+    entries = (part.decode("utf-8", "replace").split("=", 1) for part in raw.split(b"\0") if part)
+    return {entry[0]: entry[1] for entry in entries if len(entry) == 2}
+
+
 def read_comm(pid):
     try:
         with open(f"/proc/{pid}/comm") as f:

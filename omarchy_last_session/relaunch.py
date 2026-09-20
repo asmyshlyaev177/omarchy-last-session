@@ -11,9 +11,12 @@ from omarchy_last_session import config, proc
 HOME = os.path.expanduser("~")
 
 
-def build_relaunch_command(client):
-    """The shell command that recreates this window's process, or None."""
+def build_relaunch_command(client, session_file=None):
+    """The shell command that recreates this window's process, or None.
+    `session_file` is a kitty session, which reopens the whole instance."""
     pid, cls = client["pid"], client.get("class", "")
+    if session_file:
+        return shlex.join([config.TERMINALS[cls][0], config.KITTY_SESSION_FLAG, session_file])
     if cls in config.TERMINALS:
         return build_terminal_command(pid, cls)
     argv = unflatten_argv(proc.read_cmdline(pid) or [])
@@ -41,7 +44,7 @@ def read_tui_argv(pid):
     """The TUI's command line minus per-session temp files (yazi --cwd-file=...).
     Empty when the process is gone, so the terminal falls back to its shell."""
     argv = proc.read_cmdline(pid) or [proc.read_comm(pid) or ""]
-    return [arg for arg in argv if arg and not arg.startswith("--cwd-file")]
+    return [arg for arg in argv if arg and not arg.startswith(config.CWD_FILE_FLAG)]
 
 
 def build_terminal_argv(binary, cwd_flag, cwd):

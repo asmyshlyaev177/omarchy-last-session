@@ -8,7 +8,7 @@
 # The repository is bind-mounted at /work by run.sh.
 FROM docker.io/library/archlinux:latest
 
-RUN pacman -Syu --noconfirm --needed hyprland labwc foot ttf-dejavu mesa python \
+RUN pacman -Syu --noconfirm --needed hyprland labwc foot kitty ttf-dejavu mesa python \
     && pacman -Scc --noconfirm
 
 # Hyprland refuses to run as root, and the tests are owned by uid 1000 on the host.

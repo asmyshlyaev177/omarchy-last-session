@@ -1,5 +1,6 @@
 """The snapshot: what is open now, written to the state directory."""
 
+import glob
 import json
 import os
 import signal
@@ -7,7 +8,7 @@ import stat
 import tempfile
 import time
 
-from omarchy_last_session import config, hypr, proc, relaunch, warn
+from omarchy_last_session import config, hypr, kitty, proc, relaunch, warn
 
 
 def save_session():
@@ -58,20 +59,43 @@ def snapshot_windows():
     clients = list(hypr.get_managed_clients().values())
     group_of = assign_group_ids(clients)
     layout = hypr.get_monitor_layout()
+    sessions = write_kitty_sessions(clients)
     windows, seen_pids = [], set()
     for client in clients:
         pid = client.get("pid", -1)
         if pid <= 0:
             continue
-        cmd = relaunch.build_relaunch_command(client)
+        cmd = relaunch.build_relaunch_command(client, sessions.get(pid))
         if not cmd:
             continue
-        # Once per window, except an app that reopens its own: a second launch
-        # of one process adds an empty window instead.
-        spawn = pid not in seen_pids or client["class"] not in config.SESSION_KEEPING_CLASSES
+        spawn = pid not in seen_pids or not does_reopen_every_window(client, pid in sessions)
         seen_pids.add(pid)
         windows.append(build_window_entry(client, cmd, spawn, group_of.get(client.get("address")), layout))
     return windows
+
+
+def does_reopen_every_window(client, has_session_file):
+    """One process serves every window and brings them all back itself, so a
+    second launch would only add a spare. A kitty session file holds every OS
+    window of its instance, which makes that kitty one of them."""
+    return has_session_file or client["class"] in config.SESSION_KEEPING_CLASSES
+
+
+def write_kitty_sessions(clients):
+    """A session file per kitty that describes itself; pid -> path. Files for
+    instances that are gone are dropped, so the directory holds no more than
+    the kitty instances now running."""
+    written = {}
+    pids = sorted({c["pid"] for c in clients if c.get("class") == config.KITTY_CLASS and c.get("pid")})
+    for pid in pids:
+        text = kitty.build_session_text(pid)
+        if text:
+            written[pid] = config.KITTY_SESSION_FILE.format(pid=pid)
+            write_private(written[pid], text)
+    for path in glob.glob(config.KITTY_SESSION_GLOB):
+        if path not in written.values():
+            os.unlink(path)
+    return written
 
 
 def build_window_entry(client, cmd, spawn, group, layout):

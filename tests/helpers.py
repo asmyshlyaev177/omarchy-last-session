@@ -135,6 +135,8 @@ class StateDirCase(unittest.TestCase):
         self.patch(config, "DISABLE_FLAG", self.disabled)
         self.patch(config, "LAST_SHUTDOWN_FILE", self.copy)
         self.patch(config, "LAST_RESTORE_FILE", self.restored)
+        self.patch(config, "KITTY_SESSION_FILE", os.path.join(path, "kitty-{pid}.session"))
+        self.patch(config, "KITTY_SESSION_GLOB", os.path.join(path, "kitty-*.session"))
 
     def patch(self, target, name, value):
         patcher = mock.patch.object(target, name, value)

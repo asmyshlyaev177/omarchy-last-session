@@ -95,6 +95,7 @@ The plugin reopens windows. What is inside them comes back through each app's ow
 | VS Code | its own windows and the folders open in them |
 | Dolphin | open tabs, with *Settings → Startup → "same locations as when closed"* |
 | yazi, nvim in a terminal | the same directory |
+| kitty | its OS windows, tabs, splits and directories, with remote control on |
 
 ## What it cannot do
 
