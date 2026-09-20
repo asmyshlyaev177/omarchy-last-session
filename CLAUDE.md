@@ -32,7 +32,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests                                  # 205 tests, under a second
+python3 -m unittest discover -s tests                                  # 211 tests, under a second
 uv run --no-project --python 3.9 python -m unittest discover -s tests  # the CI's 3.9 leg
 uvx ruff check . && uvx ruff format --check .                          # config in pyproject.toml
 omarchy plugin validate .
@@ -53,7 +53,15 @@ CI runs the unit suite on Python 3.9 and 3.13 and the two ruff checks. The live 
 
 ## Trying a change on this desktop
 
-The installed plugin at `~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session` is a git clone of the GitHub repository, not of this checkout. `omarchy plugin update io.github.asmyshlyaev177.last-session` fast-forwards it after a push. For uncommitted work, copy the tree over it and restart the shell, as the README's development section shows with `rsync`.
+The installed plugin at `~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session` is a git clone of the GitHub repository, not of this checkout. `omarchy plugin update io.github.asmyshlyaev177.last-session` fast-forwards it after a push. For uncommitted work, copy the tree over it and restart the shell:
+
+```sh
+rsync -a --delete --exclude='.git/' --exclude='__pycache__/' --exclude='.ruff_cache/' \
+  ./ ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/
+omarchy-restart-shell
+```
+
+The daemon's first save then lands after its 90 s delay. The README stays public and does not carry this recipe.
 
 - Any file written under the installed directory hot-reloads the plugin: restore runs and aborts, and the daemon's 90 s delay starts again.
 - Find the daemon with `ps -C python3 -o pid,ppid,args | grep 'last-session daemon'`. A `pgrep -f` on that string also matches the shell running it.

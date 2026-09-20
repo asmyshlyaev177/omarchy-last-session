@@ -96,12 +96,18 @@ def normalize_class(cls):
 
 
 def find_desktop_command(cls):
-    """Exec line of the .desktop entry for a window class, or None."""
+    """Exec line of the .desktop entry for a window class, or None. An entry
+    named after the class, by file name or StartupWMClass, beats one that only
+    runs a program of that name: every game shortcut Steam writes runs steam,
+    with the game's URL as the argument."""
     wanted = normalize_class(cls)
+    by_program = None
     for path, entry in iter_desktop_entries():
         if wanted in get_desktop_entry_names(path, entry):
             return entry["exec"]
-    return None
+        if by_program is None and wanted == get_desktop_entry_program(entry):
+            by_program = entry["exec"]
+    return by_program
 
 
 def iter_desktop_entries():
@@ -114,15 +120,19 @@ def iter_desktop_entries():
 
 
 def get_desktop_entry_names(path, entry):
-    """What a window class may match: the file name, StartupWMClass, and the program."""
+    """What names a window class: the file name and StartupWMClass."""
     names = {os.path.basename(path).removesuffix(".desktop").lower()}
     if entry.get("startupwmclass"):
         names.add(entry["startupwmclass"].lower())
-    try:
-        names.add(os.path.basename(shlex.split(entry["exec"])[0]).lower())
-    except (ValueError, IndexError):
-        pass
     return names
+
+
+def get_desktop_entry_program(entry):
+    """Basename of the program Exec runs, lowercased; None when unparsable."""
+    try:
+        return os.path.basename(shlex.split(entry["exec"])[0]).lower()
+    except (ValueError, IndexError):
+        return None
 
 
 def read_desktop_entry(path):

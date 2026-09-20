@@ -1,0 +1,15 @@
+#!/bin/bash
+# Stand-in for Steam. Its window belongs to a helper it starts by relative
+# path, as the real client's belongs to ./steamwebhelper, so the command line
+# behind the window cannot be replayed and restore has to find the client
+# through a .desktop entry. Started with a game's URL, which is how every
+# shortcut Steam writes starts it, it opens that game's window too, under the
+# class Steam gives a running game.
+for arg in "$@"; do
+    case $arg in
+        steam://rungameid/*)
+            foot --app-id="steam_app_${arg##*/}" --title="game ${arg##*/}" sleep 86400 &
+            ;;
+    esac
+done
+exec -a ./steamwebhelper foot --app-id=steam --title=Steam sleep 86400

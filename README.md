@@ -182,7 +182,7 @@ tests/integration/run.sh                  # every live test
 tests/integration/run.sh -k two_monitors  # a unittest -k filter
 ```
 
-These run a real Hyprland with two headless monitors in a container, open real windows, and drive the script through its command line. Nothing is mocked. Two of the stand-in apps are single-instance: they serve every window from one process and reopen those windows themselves, which is what a browser and an editor do and where most of the mistakes have been. A test builds a session, saves it, boots a fresh compositor with the monitors in the other order, restores, and compares what came back against what was saved: workspaces, monitors, floating geometry, pinned and maximized state, groups, and that a browser is one process again. Another test undocks, restoring a two-monitor session onto one.
+These run a real Hyprland with two headless monitors in a container, open real windows, and drive the script through its command line. Nothing is mocked. Two of the stand-in apps are single-instance: they serve every window from one process and reopen those windows themselves, which is what a browser and an editor do and where most of the mistakes have been. A third stands in for Steam, whose window belongs to a helper started by relative path, so restore has to find the client through a desktop entry and not through the shortcut of the game it was started for. A test builds a session, saves it, boots a fresh compositor with the monitors in the other order, restores, and compares what came back against what was saved: workspaces, monitors, floating geometry, pinned and maximized state, groups, and that a browser is one process again. Another test undocks, restoring a two-monitor session onto one.
 
 They need [Podman](https://podman.io) or Docker and a DRM render node. Mesa does the rendering and no GPU is needed, but the node has to exist, because the compositor's backend opens one to allocate buffers. The first run builds the image. On an Omarchy host the container mounts Omarchy's Hyprland defaults, so the windows meet the same rules as on the desktop. Set `OLS_CONTAINER=docker` where rootless Podman has no subuid range to map with.
 
@@ -194,13 +194,7 @@ To try a checkout as the installed plugin:
 omarchy plugin add /path/to/omarchy-last-session --enable
 ```
 
-That clones, so it installs the last commit. To try uncommitted work, copy the tree over the installed plugin and restart the shell:
-
-```sh
-rsync -a --delete --exclude='.git/' --exclude='__pycache__/' --exclude='.ruff_cache/' \
-  ./ ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/
-omarchy-restart-shell
-```
+That clones, so it installs the last commit.
 
 ## License
 

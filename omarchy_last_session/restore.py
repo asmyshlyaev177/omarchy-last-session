@@ -128,7 +128,7 @@ def place_new_arrivals(pending, seen, origins, first_seen, now, deadline):
         fixing = len(client.get("grouped") or []) <= 1 and is_out_of_place(entry, client, origins)
         log(describe_pairing(entry, client, fixing))
         if fixing:
-            place_window(entry, address, origins)
+            place_window(entry, address, origins, floating=bool(client.get("floating")))
     return placed
 
 
@@ -261,20 +261,21 @@ def get_client_argv(client):
 
 def is_out_of_place(win, client, origins):
     misplaced = client["workspace"].get("id") != win["workspace"].get("id")
-    geometry_off = win["floating"] and (
-        client.get("floating") != win["floating"]
-        or get_live_offset(client, origins) != get_saved_offset(win, origins)
-    )
-    return misplaced or geometry_off or bool(win.get("fullscreen", 0)) or win["pinned"]
+    # A window rule may float a window that was saved tiled, as Omarchy's does
+    # to Steam; left floating it cannot rejoin its group.
+    floating_off = bool(client.get("floating")) != bool(win["floating"])
+    geometry_off = win["floating"] and get_live_offset(client, origins) != get_saved_offset(win, origins)
+    return misplaced or floating_off or geometry_off or bool(win.get("fullscreen", 0)) or win["pinned"]
 
 
-def place_window(win, address, origins):
-    """Silently move and shape an existing window to match its saved state."""
+def place_window(win, address, origins, floating=False):
+    """Silently move and shape an existing window to match its saved state.
+    `floating` is whether the window floats right now."""
     target = hypr.quote_window(address)
     if win["pinned"]:
         place_pinned_window(win, target, origins)
     else:
-        place_on_workspace(win, target, origins)
+        place_on_workspace(win, target, origins, floating)
     fullscreen = win.get("fullscreen", 0)
     if fullscreen:
         mode = "fullscreen" if fullscreen & 2 else "maximized"
@@ -296,10 +297,12 @@ def place_pinned_window(win, target, origins):
     hypr.dispatch(f"hl.dsp.window.pin({{ action = 'on', window = {target} }})")
 
 
-def place_on_workspace(win, target, origins):
+def place_on_workspace(win, target, origins, floating):
     selector = hypr.quote_lua(hypr.format_workspace_selector(win["workspace"]))
     hypr.dispatch(f"hl.dsp.window.move({{ workspace = {selector}, follow = false, window = {target} }})")
     if not win["floating"]:
+        if floating:
+            hypr.dispatch(f"hl.dsp.window.float({{ action = 'off', window = {target} }})")
         return
     hypr.dispatch(f"hl.dsp.window.float({{ action = 'on', window = {target} }})")
     # A workspace takes its floating windows along when it changes monitor, so

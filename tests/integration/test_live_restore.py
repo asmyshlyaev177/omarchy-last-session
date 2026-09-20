@@ -17,6 +17,7 @@ import json
 import os
 import pathlib
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -337,6 +338,12 @@ class LiveRestore(unittest.TestCase):
         c.lua(f"hl.get_window({alpha}).group:add(hl.get_window({tab}))")
         c.dispatch("hl.dsp.focus({ workspace = 2 })")
 
+    def write_desktop_entry(self, name, exec_line):
+        apps = os.path.join(self.comp.home, ".local", "share", "applications")
+        os.makedirs(apps, exist_ok=True)
+        with open(os.path.join(apps, name), "w") as f:
+            f.write(f"[Desktop Entry]\nExec={exec_line}\n")
+
     def snapshot(self, action, name):
         state = os.path.join(self.work, name)
         done = self.comp.run_script(action, state)
@@ -436,6 +443,52 @@ class LiveRestore(unittest.TestCase):
         after = self.snapshot("save", "state-after")
         with self.subTest("both projects back, and nothing spare"):
             self.assertEqual(editor_windows(after), before, c.requests())
+
+    def test_steam_comes_back_without_the_game_it_was_started_for(self):
+        """Steam was started from a game's shortcut, and every shortcut it
+        writes into the user's applications directory runs steam with the
+        game's URL. The client's window belongs to a helper whose relative path
+        cannot be replayed, so restore finds the client through a .desktop
+        entry, and the shortcut, which is found first, must not be the one.
+
+        Omarchy floats Steam by rule, and the user tiled it into a group with
+        a terminal. Relaunched, it floats again, and restore has to undo that
+        before it can rejoin the group."""
+        c = self.comp
+        c.boot(MONITORS)
+        self.write_desktop_entry("steam.desktop", "steam %U")
+        self.write_desktop_entry("Warhammer 40,000 Boltgun.desktop", "steam steam://rungameid/2005010")
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        opened = c.open_windows("steam steam://rungameid/2005010", count=2)
+        game = next(w for w in opened if w["class"].startswith("steam_app_"))
+        os.kill(game["pid"], signal.SIGTERM)
+        wait_for(
+            lambda: all(not w["class"].startswith("steam_app_") for w in c.clients()), "the game to close"
+        )
+        steam = next(w for w in opened if w["class"] == "steam")
+        notes = address(c.open_window("foot --app-id=notes"))
+        c.dispatch(f"hl.dsp.window.float({{ action = 'off', window = {address(steam)} }})")
+        c.dispatch(f"hl.dsp.group.toggle({{ window = {notes} }})")
+        c.lua(f"hl.get_window({notes}).group:add(hl.get_window({address(steam)}))")
+        wait_for(lambda: len(c.window(steam)["grouped"]) == 2, "Steam to join the group")
+
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual(
+            sorted((w["class"], w["cmd"]) for w in saved["windows"]),
+            [("notes", "foot --app-id=notes"), ("steam", "steam")],
+        )
+        self.assertEqual(group_shapes(saved), [(1, ("notes", "steam"))])
+
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        time.sleep(1)  # a game started by mistake maps moments after the client
+        self.assertEqual(sorted(w["class"] for w in c.clients()), ["notes", "steam"], c.requests())
+        after = self.snapshot("save", "state-after")
+        with self.subTest("tiled again, and back in its group"):
+            self.assertEqual(shape(after), shape(saved), c.requests())
+            self.assertEqual(group_shapes(after), group_shapes(saved), c.requests())
 
     def test_a_session_from_two_monitors_comes_back_on_one(self):
         """Undocked between logins. The second monitor's windows have nowhere

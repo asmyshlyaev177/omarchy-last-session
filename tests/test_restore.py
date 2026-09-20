@@ -205,6 +205,23 @@ class RestoreSweep(RestoreHarness):
         emitted = self.run_restore([{}, landed], sweep_timeout=2)
         self.assertFalse(any("window.move" in e for e in emitted))
 
+    def test_a_window_saved_tiled_that_came_back_floating_is_tiled_before_grouping(self):
+        """Omarchy floats every Steam window by rule. Saved tiled in a group,
+        the relaunched window floats, and a floating window cannot join a group,
+        so the sweep has to tile it first."""
+        mines, steam = saved_window("org.gnome.Mines", ws=1), saved_window("steam", ws=1, at=(1, 0))
+        mines["group"] = steam["group"] = 0
+        self.write_session([mines, steam])
+        landed = {
+            "0xa": {"class": "org.gnome.Mines", "workspace": {"id": 1}, "at": [0, 0], "floating": False},
+            "0xb": {"class": "steam", "workspace": {"id": 1}, "at": [1, 0], "floating": True},
+        }
+        emitted = self.run_restore([{}, landed], sweep_timeout=5)
+        tiled = next(i for i, e in enumerate(emitted) if "action = 'off'" in e and "address:0xb" in e)
+        grouped = next(i for i, e in enumerate(emitted) if "group:add" in e)
+        self.assertLess(tiled, grouped)
+        self.assertFalse(any("address:0xa" in e and "window.float" in e for e in emitted))
+
     def test_group_of_one_is_still_moved(self):
         """A lone window can report itself as a group of one; the sweep must
         still move it. Only a real group of two or more is left alone."""
@@ -545,15 +562,20 @@ class PairAcrossProcesses(unittest.TestCase):
 
 
 class PlaceWindow(unittest.TestCase):
-    def emit(self, win, address="0xaa", origins=None, workspace_on="eDP-1"):
+    def emit(self, win, address="0xaa", origins=None, workspace_on="eDP-1", floating=False):
         """`workspace_on` is the monitor the saved workspace lives on now."""
         live = [{"id": win["workspace"]["id"], "monitor": workspace_on}]
         with (
             mock.patch.object(hypr, "dispatch") as dispatched,
             mock.patch.object(hypr, "query", return_value=live),
         ):
-            restore.place_window(win, address, origins or {})
+            restore.place_window(win, address, origins or {}, floating=floating)
         return [c.args[0] for c in dispatched.call_args_list]
+
+    def test_a_tiled_window_that_floats_now_is_tiled_again(self):
+        emitted = self.emit(saved_window("steam"), floating=True)
+        self.assertEqual(len(emitted), 2)
+        self.assertIn("window.float({ action = 'off'", emitted[1])
 
     def test_floating_window_regains_position_and_size(self):
         emitted = self.emit(saved_window("x", floating=True, at=(10, 20), size=(300, 400)))
@@ -641,6 +663,10 @@ class OutOfPlace(unittest.TestCase):
         saved = saved_window("x", floating=True, at=(2250, 485), monitor_name="DP-9")
         landed = {"workspace": {"id": 2}, "floating": True, "at": [330, 485], "monitor": 0}
         self.assertFalse(restore.is_out_of_place(saved, landed, self.ORIGINS))
+
+    def test_a_window_saved_tiled_that_floats_now_is_out_of_place(self):
+        landed = {"workspace": {"id": 2}, "floating": True, "at": [0, 0], "monitor": 0}
+        self.assertTrue(restore.is_out_of_place(saved_window("steam"), landed, self.ORIGINS))
 
     def test_a_different_offset_is(self):
         saved = saved_window("x", floating=True, at=(2250, 485), monitor_name="DP-9")

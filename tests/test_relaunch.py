@@ -116,9 +116,33 @@ class DesktopLookup(DesktopDirCase):
         self.write_desktop("other.desktop", "[Desktop Entry]\nExec=other\n")
         self.assertIsNone(relaunch.find_desktop_command("nosuchclass"))
 
+    def test_falls_back_to_the_program_exec_runs(self):
+        self.write_desktop("gimp.desktop", "[Desktop Entry]\nExec=gimp-2.10 %U\n")
+        self.assertEqual(relaunch.find_desktop_command("gimp-2.10"), "gimp-2.10")
+
+    def test_an_entry_named_after_the_class_beats_a_shortcut_that_runs_it(self):
+        """Steam writes a shortcut per game into the user's applications
+        directory, which is searched first, and every one of them runs steam
+        with the game's URL. Restoring through it would start the game."""
+        self.write_desktop(
+            "Warhammer 40,000 Boltgun.desktop", "[Desktop Entry]\nExec=steam steam://rungameid/2005010\n"
+        )
+        self.write_desktop("steam.desktop", "[Desktop Entry]\nExec=/usr/bin/steam %U\n")
+        self.assertEqual(relaunch.find_desktop_command("steam"), "/usr/bin/steam")
+
 
 class RelaunchCommand(DesktopDirCase):
     """The end-to-end save path, with /proc and the desktop dirs faked."""
+
+    def test_steam_relaunches_its_client_not_the_game_it_was_started_for(self):
+        """The window belongs to steamwebhelper, whose relative path cannot be
+        replayed, so the command comes from a .desktop entry."""
+        self.write_desktop(
+            "Warhammer 40,000 Boltgun.desktop", "[Desktop Entry]\nExec=steam steam://rungameid/2005010\n"
+        )
+        self.write_desktop("steam.desktop", "[Desktop Entry]\nExec=/usr/bin/steam %U\n")
+        with mock.patch.object(proc, "read_cmdline", return_value=["./steamwebhelper", "-nocrashdialog"]):
+            self.assertEqual(relaunch.build_relaunch_command(client("steam")), "/usr/bin/steam")
 
     def test_brave_is_unflattened_and_gets_restore_flag(self):
         with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=[BRAVE_BLOB]):
