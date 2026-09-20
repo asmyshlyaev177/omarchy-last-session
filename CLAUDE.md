@@ -24,6 +24,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 - Restore refuses to run when more than `MAX_PREEXISTING_WINDOWS` (3) windows are open. Every hot reload of the installed plugin re-runs restore, which then aborts with "session already populated".
 - The daemon sleeps `DAEMON_INITIAL_DELAY` (90 s) before its first save, then wakes on placement events from Hyprland's socket2 and saves at most every `SAVE_INTERVAL` (60 s) otherwise. Vanished windows are written only after `SETTLE_DELAY` (10 s) of quiet, which outlasts Omarchy's close-all before poweroff.
 - State lives in `~/.local/state/omarchy-last-session`: `session.json`, `last-restore.json` (the snapshot restore used), `last-shutdown.json` (written by `shutdown` only), and the `disabled` flag. `OMARCHY_LAST_SESSION_DIR` overrides the directory.
+- Every state file is read through `session.open_private` and written through `session.write_private`. They keep the directory 0700 and the files 0600, refuse a symlink or another user's directory in the state directory's place, and never follow a symlink. The marketplace review required this, so a new state file goes through them too.
 - Excluded classes come from `OMARCHY_LAST_SESSION_EXCLUDE`. On this machine it is set with `hl.env(...)` in `~/.config/hypr/hyprland.lua`, which is the only way the shell-spawned daemon inherits it.
 - `log()` writes to stdout and `warn()` to stderr. `Service.qml` forwards both to the journal. The live suite asserts that restore's stderr is empty, so a new diagnostic that is not an error goes through `log()`.
 - `chromium.mark_clean_exit` is the one write outside the state directory. It sets `profile.exit_type` to `Normal` in every `*/Preferences` under the browser's user data directory. The README discloses it, and the marketplace form was answered on that basis.
@@ -31,7 +32,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests                                  # 193 tests, under a second
+python3 -m unittest discover -s tests                                  # 205 tests, under a second
 uv run --no-project --python 3.9 python -m unittest discover -s tests  # the CI's 3.9 leg
 uvx ruff check . && uvx ruff format --check .                          # config in pyproject.toml
 omarchy plugin validate .

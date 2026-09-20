@@ -8,6 +8,7 @@ test sees the fake through the module attribute. Nothing mocks Hyprland itself.
 import itertools
 import json
 import os
+import stat
 import tempfile
 import unittest
 from unittest import mock
@@ -110,17 +111,26 @@ def write_executable(path):
     os.chmod(path, 0o755)
 
 
+def mode_of(path):
+    """Permission bits of the path itself, a symlink included."""
+    return stat.S_IMODE(os.lstat(path).st_mode)
+
+
 class StateDirCase(unittest.TestCase):
     """A temporary state directory, patched into config for the test."""
 
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
-        self.session = os.path.join(self.dir.name, "session.json")
-        self.disabled = os.path.join(self.dir.name, "disabled")
-        self.copy = os.path.join(self.dir.name, "last-shutdown.json")
-        self.restored = os.path.join(self.dir.name, "last-restore.json")
-        self.patch(config, "STATE_DIR", self.dir.name)
+        self.use_state_dir(self.dir.name)
+
+    def use_state_dir(self, path):
+        """Point every state path at path, which need not exist yet."""
+        self.session = os.path.join(path, "session.json")
+        self.disabled = os.path.join(path, "disabled")
+        self.copy = os.path.join(path, "last-shutdown.json")
+        self.restored = os.path.join(path, "last-restore.json")
+        self.patch(config, "STATE_DIR", path)
         self.patch(config, "SESSION_FILE", self.session)
         self.patch(config, "DISABLE_FLAG", self.disabled)
         self.patch(config, "LAST_SHUTDOWN_FILE", self.copy)

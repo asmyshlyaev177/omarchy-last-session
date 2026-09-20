@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 from omarchy_last_session import cli, hypr, proc, session
-from tests.helpers import StateDirCase, client
+from tests.helpers import StateDirCase, client, mode_of
 
 
 class Shutdown(StateDirCase):
@@ -31,6 +31,11 @@ class Shutdown(StateDirCase):
         self.run_shutdown([client("code")])
         with open(self.session) as a, open(self.copy) as b:
             self.assertEqual(a.read(), b.read())
+
+    def test_the_copy_is_readable_by_this_user_only(self):
+        self.addCleanup(os.umask, os.umask(0o000))
+        self.run_shutdown([client("code")])
+        self.assertEqual(mode_of(self.copy), 0o600)
 
     def test_plain_save_does_not_touch_the_copy(self):
         """Only a clean exit updates it; the 60-second daemon must not."""

@@ -1,10 +1,21 @@
+import io
+import json
 import os
+import sys
 import time
 import unittest
 from unittest import mock
 
 from omarchy_last_session import config, hypr, proc, session
-from tests.helpers import BRAVE_BLOB, StateDirCase, client, grouped_clients, pretend_runnable
+from tests.helpers import (
+    BRAVE_BLOB,
+    StateDirCase,
+    client,
+    grouped_clients,
+    mode_of,
+    pretend_runnable,
+    saved_window,
+)
 
 
 class Save(StateDirCase):
@@ -108,6 +119,101 @@ class MonitorCapture(StateDirCase):
     def test_unknown_monitor_id_records_an_empty_name(self):
         saved = self.save_with_monitors([client("code", monitor=9)], [{"id": 0, "name": "eDP-1"}])
         self.assertEqual(saved["monitor_name"], "")
+
+
+class PrivateState(StateDirCase):
+    """A snapshot holds every window's command line and title, so the state
+    directory and everything in it must be readable by this user alone,
+    whatever the umask and whatever an older version left behind."""
+
+    def setUp(self):
+        super().setUp()
+        self.state = os.path.join(self.dir.name, "state")
+        self.use_state_dir(self.state)
+
+    def with_umask(self, mask):
+        self.addCleanup(os.umask, os.umask(mask))
+
+    def load_quietly(self):
+        with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+            return session.load_session(), err.getvalue()
+
+    def test_the_state_directory_is_created_for_this_user_only(self):
+        self.with_umask(0o000)
+        self.save_with([client("code")])
+        self.assertEqual(mode_of(self.state), 0o700)
+
+    def test_the_snapshot_is_readable_by_this_user_only(self):
+        self.with_umask(0o000)
+        self.save_with([client("code")])
+        self.assertEqual(mode_of(self.session), 0o600)
+
+    def test_a_token_on_a_command_line_is_saved_and_hidden_from_other_users(self):
+        """The command line is what relaunches the window, so nothing in it can
+        be left out; the modes on the way to it are what keep it private."""
+        self.save_with([client("code")], cmdline=("/bin/sh", "--token=hunter2"))
+        with open(self.session) as f:
+            self.assertIn("hunter2", f.read())
+        for path in (self.state, self.session):
+            self.assertEqual(mode_of(path) & 0o077, 0, f"{path} is open to other users")
+
+    def test_a_directory_left_open_by_an_older_version_is_closed(self):
+        os.mkdir(self.state, 0o755)
+        self.save_with([client("code")])
+        self.assertEqual(mode_of(self.state), 0o700)
+
+    def test_a_snapshot_left_open_by_an_older_version_is_closed_when_read(self):
+        os.mkdir(self.state, 0o700)
+        self.write_session([saved_window("code")])
+        os.chmod(self.session, 0o644)
+        windows, err = self.load_quietly()
+        self.assertEqual([w["class"] for w in windows], ["code"])
+        self.assertEqual(err, "")
+        self.assertEqual(mode_of(self.session), 0o600)
+
+    def test_a_missing_snapshot_is_not_an_error(self):
+        self.assertEqual(self.load_quietly(), ([], ""))
+        self.assertEqual(mode_of(self.state), 0o700, "the directory is set up on the first read")
+
+    def test_a_symlink_in_place_of_the_state_directory_is_refused(self):
+        os.symlink(self.dir.name, self.state)
+        with self.assertRaises(PermissionError):
+            self.save_with([client("code")])
+        self.assertEqual(os.listdir(self.dir.name), ["state"], "nothing was written through the link")
+
+    def test_a_directory_owned_by_another_user_is_refused(self):
+        os.mkdir(self.state, 0o700)
+        with mock.patch.object(os, "geteuid", return_value=os.geteuid() + 1):
+            with self.assertRaises(PermissionError):
+                self.save_with([client("code")])
+            self.assertEqual(self.load_quietly()[0], [])
+
+    def test_a_symlink_in_place_of_the_snapshot_is_neither_read_nor_written_through(self):
+        os.mkdir(self.state, 0o700)
+        elsewhere = os.path.join(self.dir.name, "elsewhere.json")
+        with open(elsewhere, "w") as f:
+            json.dump({"windows": [saved_window("code")]}, f)
+        os.symlink(elsewhere, self.session)
+        windows, err = self.load_quietly()
+        self.assertEqual(windows, [])
+        self.assertIn("could not read", err)
+        self.save_with([client("foot")])
+        self.assertFalse(os.path.islink(self.session))
+        self.assertEqual(mode_of(self.session), 0o600)
+        with open(elsewhere) as f:
+            self.assertEqual(json.load(f)["windows"][0]["class"], "code")
+
+    def test_the_restore_copy_is_readable_by_this_user_only(self):
+        self.with_umask(0o000)
+        self.save_with([client("code")])
+        session.keep_restore_copy()
+        self.assertEqual(mode_of(self.restored), 0o600)
+        self.assertEqual(self.read_session(self.restored), self.read_session())
+
+    def test_a_failed_write_leaves_no_temporary_file_behind(self):
+        with self.assertRaises(TypeError):
+            session.write_private(self.session, b"not text")
+        self.assertEqual(os.listdir(self.state), [])
 
 
 class SaveSchedule(unittest.TestCase):

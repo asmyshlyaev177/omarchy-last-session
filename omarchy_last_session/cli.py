@@ -12,7 +12,6 @@ Skip the next restore:   touch <state dir>/disabled
 Extra excluded classes:  OMARCHY_LAST_SESSION_EXCLUDE="class1,class2"
 """
 
-import shutil
 import sys
 import time
 
@@ -26,7 +25,7 @@ def run_save():
 def run_shutdown():
     print(f"saved {session.save_session()} windows")
     try:
-        shutil.copyfile(config.SESSION_FILE, config.LAST_SHUTDOWN_FILE)
+        session.copy_session_to(config.LAST_SHUTDOWN_FILE)
     except OSError as e:
         warn(f"could not keep a copy: {e}")
     stubborn = session.quit_session_keeping_apps()
