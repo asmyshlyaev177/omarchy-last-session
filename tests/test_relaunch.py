@@ -144,6 +144,13 @@ class RelaunchCommand(DesktopDirCase):
         with mock.patch.object(proc, "read_cmdline", return_value=["./steamwebhelper", "-nocrashdialog"]):
             self.assertEqual(relaunch.build_relaunch_command(client("steam")), "/usr/bin/steam")
 
+    def test_libreoffice_drops_the_splash_descriptor_it_was_handed(self):
+        """--splash-pipe names a descriptor of the run being saved."""
+        argv = ["/usr/lib/libreoffice/program/soffice.bin", "--writer", "/srv/notes.odt", "--splash-pipe=5"]
+        with mock.patch.object(proc, "read_cmdline", return_value=argv), pretend_runnable():
+            cmd = relaunch.build_relaunch_command(client("libreoffice-writer"))
+        self.assertEqual(cmd, "/usr/lib/libreoffice/program/soffice.bin --writer /srv/notes.odt")
+
     def test_kitty_with_a_session_replays_the_whole_instance(self):
         """Its tabs and splits are in the file, so the relaunch points at it
         instead of opening one bare window in a directory."""

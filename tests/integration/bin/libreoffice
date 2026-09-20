@@ -1,0 +1,36 @@
+#!/bin/bash
+# Stand-in for an office suite: one process owns every window, and a second run
+# hands its arguments to that process instead of starting another instance.
+# Unlike the editor it reopens nothing by itself, so one launch is one window.
+#
+# Its own socket, and a lock named for the compositor run, so a fresh login
+# starts with nothing running.
+socket="$XDG_RUNTIME_DIR/foot-office.sock"
+lock="$XDG_RUNTIME_DIR/office-${HYPRLAND_INSTANCE_SIGNATURE:-0}.lock"
+
+app_id=soffice
+title="Welcome to LibreOffice!"
+for arg in "$@"; do
+    case "$arg" in
+        --writer) app_id=libreoffice-writer ;;
+        --calc) app_id=libreoffice-calc ;;
+        -*) ;;
+        *) title="${arg##*/}" ;;
+    esac
+done
+
+open_window() {
+    for _ in $(seq 1 50); do
+        footclient --server-socket="$socket" --no-wait --app-id="$app_id" \
+            --title="$title" sleep 86400 2>/dev/null && return
+        sleep 0.2
+    done
+}
+
+if [ -e "$lock" ]; then
+    open_window
+    exit 0
+fi
+: > "$lock"
+open_window &
+exec -a libreoffice foot --server="$socket"

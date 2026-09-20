@@ -34,6 +34,12 @@ class Save(StateDirCase):
             self.assertEqual(self.save_with(two, cmdline=(BRAVE_BLOB,)), 2)
         self.assertEqual([w["spawn"] for w in self.read_session()], [True, False])
 
+    def test_hyprlands_own_dialog_is_not_saved(self):
+        """Restoring the compositor's "not responding" prompt would ask again
+        about a process that is gone."""
+        self.save_with([client("hyprland-dialog"), client("foot")])
+        self.assertEqual([w["class"] for w in self.read_session()], ["foot"])
+
     def test_excluded_class_is_not_saved(self):
         with mock.patch.object(config, "EXCLUDE_CLASSES", {"jobbot-search"}):
             self.save_with([client("jobbot-search")])
@@ -71,6 +77,33 @@ class SecondWindowOfOneProcess(StateDirCase):
     def test_separate_processes_are_each_launched(self):
         two = [client("brave-browser", pid=7), client("brave-browser", pid=8)]
         self.assertEqual(self.spawn_flags(two), [True, True])
+
+    def test_libreoffice_is_launched_once_per_process(self):
+        """The start centre, every document window and every dialog belong to
+        one soffice process and report its command line."""
+        three = [client("libreoffice-writer", pid=7), client("soffice", pid=7), client("soffice", pid=7)]
+        self.assertEqual(self.spawn_flags(three), [True, False, False])
+
+    def test_gimp_is_launched_once_per_process(self):
+        """A second image joins the running GIMP rather than starting one."""
+        two = [client("gimp", pid=7), client("gimp", pid=7)]
+        self.assertEqual(self.spawn_flags(two), [True, False])
+
+
+class SingleInstanceApps(unittest.TestCase):
+    """Shutdown SIGTERMs the session keeping apps so they write their windows
+    down before the power menu closes anything."""
+
+    def test_libreoffice_and_gimp_are_launched_once_but_never_signalled(self):
+        """Both answer a SIGTERM with a save prompt, then come back offering
+        document recovery instead of the document."""
+        for cls in ("soffice", "libreoffice-writer", "libreoffice-calc", "gimp"):
+            with self.subTest(cls=cls):
+                self.assertIn(cls, config.SINGLE_INSTANCE_CLASSES)
+                self.assertNotIn(cls, config.SESSION_KEEPING_CLASSES)
+
+    def test_a_session_keeping_app_is_also_launched_once(self):
+        self.assertLessEqual(config.SESSION_KEEPING_CLASSES, config.SINGLE_INSTANCE_CLASSES)
 
 
 class GroupCapture(StateDirCase):

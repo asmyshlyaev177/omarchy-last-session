@@ -9,9 +9,9 @@ import time
 
 from omarchy_last_session import config, warn
 
-# Events that can move a window, or add or remove one. The rest are ignored:
-# a title event fires several times a second on a page with a live ticker, and
-# titles are picked up by the periodic save instead.
+# Events that can move a window, or add or remove one. A title event fires
+# several times a second on a page with a live ticker, so titles are left to
+# the periodic save.
 PLACEMENT_EVENTS = frozenset(
     (
         b"openwindow",
@@ -39,8 +39,8 @@ def query(cmd):
 
 
 def dispatch(lua):
-    """One Lua dispatch. A dispatcher missing on this Hyprland would otherwise
-    fail silently, and the windows just stay where they landed."""
+    """One Lua dispatch. A dispatcher missing on this Hyprland fails silently
+    otherwise, and the windows just stay where they landed."""
     reply = _request("dispatch", lua)
     if not reply.startswith("ok"):
         warn(f"dispatch rejected: {reply or 'no reply'}\n  {lua}")
@@ -48,8 +48,8 @@ def dispatch(lua):
 
 
 def eval_lua(lua):
-    """Lua run inside the compositor. It reaches the group object, which takes
-    an existing window and which no dispatcher exposes."""
+    """Lua run inside the compositor, which reaches the group object that no
+    dispatcher exposes."""
     reply = _request("eval", lua)
     if reply != "ok":
         warn(f"eval rejected: {reply or 'no reply'}\n  {lua}")
@@ -107,9 +107,8 @@ class EventStream:
         self._partial = b""
 
     def wait(self, timeout):
-        """Block until a window moves, appears or vanishes, or until `timeout`
-        seconds pass. False means the compositor has gone, so the caller stops
-        rather than snapshotting a session that is being torn down."""
+        """Block until a window moves, appears or vanishes, or `timeout` passes.
+        False means the compositor has gone and the caller should stop."""
         deadline = time.monotonic() + timeout
         while True:
             remaining = deadline - time.monotonic()
@@ -122,16 +121,15 @@ class EventStream:
                 return True
 
     def _has_placement_event(self, chunk):
-        """Event names arrive as `name>>payload` lines. A line split across two
-        reads is held over, so no event is missed at a chunk boundary."""
+        """Events arrive as `name>>payload` lines. A line split across two reads
+        is held over, so none is missed at a chunk boundary."""
         lines = (self._partial + chunk).split(b"\n")
         self._partial = lines.pop()
         return any(line.split(b">>", 1)[0] in PLACEMENT_EVENTS for line in lines)
 
 
 def open_event_stream():
-    """Hyprland's event socket, or None when it cannot be reached, which leaves
-    the daemon on its periodic save alone."""
+    """Hyprland's event socket, or None, which leaves the daemon on its timer."""
     signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
     runtime_dir = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
     if not signature:
@@ -148,8 +146,7 @@ def open_event_stream():
 
 
 def wait_for_placement_change(stream, timeout):
-    """False when the compositor has gone. Without a stream this is the timer
-    the daemon falls back to."""
+    """False when the compositor has gone. Without a stream, a plain sleep."""
     if stream is None:
         time.sleep(timeout)
         return True
@@ -157,8 +154,8 @@ def wait_for_placement_change(stream, timeout):
 
 
 def get_layout():
-    """Every managed window's placement, by address: what the daemon watches
-    for change. Titles are left out, since they change all the time."""
+    """Every managed window's placement, by address. Titles are left out: they
+    change without the window moving."""
     return {
         address: {field: client.get(field) for field in LAYOUT_FIELDS}
         for address, client in get_managed_clients().items()
@@ -166,8 +163,7 @@ def get_layout():
 
 
 def get_monitor_layout():
-    """Monitor id -> (name, top-left corner). Names survive a reboot and ids do
-    not; the corner turns a saved position into an offset into that monitor."""
+    """Monitor id -> (name, top-left corner). Names survive a reboot, ids do not."""
     try:
         return {
             m["id"]: (m["name"], [m.get("x", 0), m.get("y", 0)])

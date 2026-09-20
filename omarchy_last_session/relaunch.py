@@ -12,14 +12,13 @@ HOME = os.path.expanduser("~")
 
 
 def build_relaunch_command(client, session_file=None):
-    """The shell command that recreates this window's process, or None.
-    `session_file` is a kitty session, which reopens the whole instance."""
+    """The shell command that recreates this window's process, or None."""
     pid, cls = client["pid"], client.get("class", "")
     if session_file:
         return shlex.join([config.TERMINALS[cls][0], config.KITTY_SESSION_FLAG, session_file])
     if cls in config.TERMINALS:
         return build_terminal_command(pid, cls)
-    argv = unflatten_argv(proc.read_cmdline(pid) or [])
+    argv = drop_per_run_args(unflatten_argv(proc.read_cmdline(pid) or []))
     cmd = shlex.join(argv) if argv else ""
     if not is_replayable(cmd):
         cmd = find_desktop_command(cls) or ""
@@ -41,10 +40,14 @@ def build_terminal_command(pid, cls):
 
 
 def read_tui_argv(pid):
-    """The TUI's command line minus per-session temp files (yazi --cwd-file=...).
-    Empty when the process is gone, so the terminal falls back to its shell."""
+    """Empty for a process that is gone, so the terminal falls back to its shell."""
     argv = proc.read_cmdline(pid) or [proc.read_comm(pid) or ""]
-    return [arg for arg in argv if arg and not arg.startswith(config.CWD_FILE_FLAG)]
+    return drop_per_run_args(argv)
+
+
+def drop_per_run_args(argv):
+    """Without the arguments that point at nothing once the process is gone."""
+    return [arg for arg in argv if arg and not arg.startswith(config.PER_RUN_ARG_PREFIXES)]
 
 
 def build_terminal_argv(binary, cwd_flag, cwd):
@@ -100,9 +103,8 @@ def normalize_class(cls):
 
 def find_desktop_command(cls):
     """Exec line of the .desktop entry for a window class, or None. An entry
-    named after the class, by file name or StartupWMClass, beats one that only
-    runs a program of that name: every game shortcut Steam writes runs steam,
-    with the game's URL as the argument."""
+    named after the class beats one that merely runs a program of that name:
+    every game shortcut Steam writes runs steam, with the game's URL."""
     wanted = normalize_class(cls)
     by_program = None
     for path, entry in iter_desktop_entries():
@@ -123,7 +125,7 @@ def iter_desktop_entries():
 
 
 def get_desktop_entry_names(path, entry):
-    """What names a window class: the file name and StartupWMClass."""
+    """The file name and StartupWMClass, either of which can name a class."""
     names = {os.path.basename(path).removesuffix(".desktop").lower()}
     if entry.get("startupwmclass"):
         names.add(entry["startupwmclass"].lower())
@@ -139,7 +141,7 @@ def get_desktop_entry_program(entry):
 
 
 def read_desktop_entry(path):
-    """Keys of the [Desktop Entry] section, lowercased, with Exec's field codes stripped."""
+    """Keys of [Desktop Entry], lowercased, with Exec's field codes stripped."""
     try:
         with open(path, encoding="utf-8", errors="replace") as f:
             lines = [line.strip() for line in f]

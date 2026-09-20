@@ -1,15 +1,10 @@
 """Live tests: a real Hyprland with two headless monitors, real windows, and
-the script driven through its command line. Nothing is mocked.
+the plugin driven through its command line. Nothing is mocked.
 
-Run them in a container:  tests/integration/run.sh
-They need OLS_LIVE_TESTS=1 plus Hyprland, labwc and foot on PATH, so the
-discovery from the repository root skips them.
-
-Hyprland's backend needs a DRM device, so it runs nested in a headless labwc
-on the host's render node. A test builds a session out of foot windows, saves
-it, boots a fresh compositor, restores, and compares what came back with what
-was saved: once with the monitors in the other order, as their ids swap across
-real reboots, and once with the second monitor unplugged.
+Run them with tests/integration/run.sh. They need OLS_LIVE_TESTS=1 plus
+Hyprland, labwc and foot on PATH, so discovery from the repository root skips
+them. Hyprland's backend needs a DRM device, so it runs nested in a headless
+labwc on the host's render node.
 """
 
 import glob
@@ -489,16 +484,40 @@ class LiveRestore(unittest.TestCase):
         with self.subTest("both projects back, and nothing spare"):
             self.assertEqual(editor_windows(after), before, c.requests())
 
-    def test_steam_comes_back_without_the_game_it_was_started_for(self):
-        """Steam was started from a game's shortcut, and every shortcut it
-        writes into the user's applications directory runs steam with the
-        game's URL. The client's window belongs to a helper whose relative path
-        cannot be replayed, so restore finds the client through a .desktop
-        entry, and the shortcut, which is found first, must not be the one.
+    def test_an_office_suite_is_launched_once_for_all_of_its_windows(self):
+        """One process serves every window, and a second launch joins it rather
+        than opening one, so launching per saved window would only race a
+        second instance. It reopens nothing itself, so one window returns and
+        the sweep waits its full time before reporting the rest."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        doc = c.open_window(f"libreoffice --writer {self.project}/notes.odt")
+        centre = c.open_window("libreoffice")
+        self.assertEqual(doc["pid"], centre["pid"], "both windows should belong to one process")
 
-        Omarchy floats Steam by rule, and the user tiled it into a group with
-        a terminal. Relaunched, it floats again, and restore has to undo that
-        before it can rejoin the group."""
+        saved = self.snapshot("shutdown", "state")
+        office = sorted(saved["windows"], key=lambda w: w["class"])
+        self.assertEqual([w["class"] for w in office], ["libreoffice-writer", "soffice"])
+        with self.subTest("one launch serves every window of the instance"):
+            self.assertEqual([w["spawn"] for w in office], [True, False])
+
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        with self.subTest("launched once, not once per saved window"):
+            self.assertEqual(c.requests().count(office[0]["cmd"]), 1, c.requests())
+        with self.subTest("one instance, and it is the only thing running"):
+            self.assertEqual(len({w["pid"] for w in c.clients()}), 1, c.clients())
+        with self.subTest("the window it cannot reopen is reported"):
+            self.assertIn("no window turned up", restored.stderr)
+
+    def test_steam_comes_back_without_the_game_it_was_started_for(self):
+        """Steam's window belongs to a helper whose relative path cannot be
+        replayed, so restore goes to a .desktop entry, and every game shortcut
+        Steam writes is also an entry that runs steam. Omarchy floats Steam by
+        rule, so it comes back floating and has to be tiled to rejoin its
+        group."""
         c = self.comp
         c.boot(MONITORS)
         self.write_desktop_entry("steam.desktop", "steam %U")

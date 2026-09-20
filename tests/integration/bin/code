@@ -1,15 +1,12 @@
 #!/bin/bash
 # Stand-in for an editor that serves every window from one process and reopens
-# them itself when it starts, as VS Code does. The window count is its "session
-# file", which the test writes.
+# them itself, as VS Code does. The window count is its "session file", written
+# by the test. A second launch reaches the process already running and opens a
+# window with no project in it: the spare that turns up when restore launches
+# such an app per window.
 #
-# A second launch cannot start a second process. It reaches the one already
-# running, which opens a window with no project in it — the spare window that
-# turns up when restore launches such an app once per window instead of once
-# per process.
-#
-# Its own socket, so it does not collide with the fake browser's, and a lock
-# named for the compositor run, so a fresh login starts with nothing running.
+# Its own socket, and a lock named for the compositor run, so a fresh login
+# starts with nothing running.
 socket="$XDG_RUNTIME_DIR/foot-editor.sock"
 lock="$XDG_RUNTIME_DIR/editor-${HYPRLAND_INSTANCE_SIGNATURE:-0}.lock"
 

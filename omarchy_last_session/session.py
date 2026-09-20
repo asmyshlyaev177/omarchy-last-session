@@ -12,18 +12,15 @@ from omarchy_last_session import config, hypr, kitty, proc, relaunch, warn
 
 
 def save_session():
-    """Snapshot every mapped window; returns how many."""
     windows = snapshot_windows()
     write_session(windows)
     return len(windows)
 
 
 class SaveScheduler:
-    """When the daemon writes. At once when windows appear or move. Only after
-    the desktop has been still for SETTLE_DELAY when windows vanish, so the
-    power menu closing every window before a poweroff is never snapshotted
-    half done. And at least every SAVE_INTERVAL, for titles and floating
-    geometry, which change without a window coming or going."""
+    """When the daemon writes: at once when windows appear or move, only after
+    SETTLE_DELAY of quiet when they vanish, and every SAVE_INTERVAL regardless,
+    since titles and floating geometry change without a window event."""
 
     def __init__(self):
         self.saved = None
@@ -47,8 +44,7 @@ class SaveScheduler:
         self.saved, self.saved_at = self.current, now
 
     def seconds_until_recheck(self, now):
-        """How long the daemon may sleep if nothing happens: until vanished
-        windows stop being provisional, or until the periodic save."""
+        """How long the daemon may sleep if nothing happens."""
         deadlines = [self.saved_at + config.SAVE_INTERVAL]
         if self.current != self.saved:
             deadlines.append(self.still_since + config.SETTLE_DELAY)
@@ -68,23 +64,21 @@ def snapshot_windows():
         cmd = relaunch.build_relaunch_command(client, sessions.get(pid))
         if not cmd:
             continue
-        spawn = pid not in seen_pids or not does_reopen_every_window(client, pid in sessions)
+        spawn = pid not in seen_pids or not does_launch_once(client, pid in sessions)
         seen_pids.add(pid)
         windows.append(build_window_entry(client, cmd, spawn, group_of.get(client.get("address")), layout))
     return windows
 
 
-def does_reopen_every_window(client, has_session_file):
-    """One process serves every window and brings them all back itself, so a
-    second launch would only add a spare. A kitty session file holds every OS
-    window of its instance, which makes that kitty one of them."""
-    return has_session_file or client["class"] in config.SESSION_KEEPING_CLASSES
+def does_launch_once(client, has_session_file):
+    """Whether one launch of this process serves all of its windows. A kitty
+    session file holds every OS window of its instance, so it counts."""
+    return has_session_file or client["class"] in config.SINGLE_INSTANCE_CLASSES
 
 
 def write_kitty_sessions(clients):
-    """A session file per kitty that describes itself; pid -> path. Files for
-    instances that are gone are dropped, so the directory holds no more than
-    the kitty instances now running."""
+    """pid -> session file, for each kitty that describes itself. Files left by
+    instances that are gone are dropped."""
     written = {}
     pids = sorted({c["pid"] for c in clients if c.get("class") == config.KITTY_CLASS and c.get("pid")})
     for pid in pids:
@@ -133,8 +127,7 @@ def write_session(windows):
 
 
 def keep_restore_copy():
-    """What restore is about to bring back, kept where the daemon will not
-    overwrite it."""
+    """Keeps what restore is about to use, which the daemon soon overwrites."""
     try:
         copy_session_to(config.LAST_RESTORE_FILE)
     except OSError as e:
@@ -159,11 +152,12 @@ def load_session():
     return [w for w in snapshot.get("windows", []) if w["class"] not in config.EXCLUDE_CLASSES]
 
 
-# A snapshot holds every window's command line and title, so the state
-# directory and its files are this user's alone, whatever the umask.
+# A snapshot holds every window's command line and title, so the directory and
+# its files stay this user's alone whatever the umask, and no symlink in the
+# state directory's place is followed.
 def ensure_private_state_dir():
-    """Creates the directory 0700, and takes group and other bits off one an
-    older version left open. A symlink or another user's directory is refused."""
+    """Creates the directory 0700, repairing one an older version left open.
+    A symlink or another user's directory is refused."""
     os.makedirs(config.STATE_DIR, mode=0o700, exist_ok=True)
     st = os.lstat(config.STATE_DIR)
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.geteuid():
@@ -173,9 +167,7 @@ def ensure_private_state_dir():
 
 
 def write_private(path, text):
-    """Replaces a state file atomically with one of mode 0600. The temporary
-    file is created exclusively, so a symlink planted under its name is not
-    followed, and a symlink at path is replaced rather than written through."""
+    """Replaces a state file atomically with one of mode 0600."""
     ensure_private_state_dir()
     fd, tmp = tempfile.mkstemp(dir=config.STATE_DIR, prefix=os.path.basename(path) + ".", suffix=".tmp")
     try:
@@ -188,8 +180,7 @@ def write_private(path, text):
 
 
 def open_private(path):
-    """Opens a state file for reading without following a symlink, and takes
-    group and other bits off one an older version left open."""
+    """Opens a state file for reading, repairing one left readable by others."""
     ensure_private_state_dir()
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     if os.fstat(fd).st_mode & 0o077:
@@ -198,9 +189,8 @@ def open_private(path):
 
 
 def quit_session_keeping_apps(timeout=config.GRACEFUL_QUIT_TIMEOUT):
-    """SIGTERM the browsers and editors so they write their session out: a
-    plain close hits the "close N tabs?" dialog and they record a crash.
-    Returns the pids still alive when the wait ran out."""
+    """SIGTERM them so they write their session out, rather than let the power
+    menu close their windows. Returns the pids still alive at the timeout."""
     pids = {
         c["pid"]
         for c in hypr.query("clients")

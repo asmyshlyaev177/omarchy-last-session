@@ -1,7 +1,7 @@
-"""Chromium refuses to restore its last session after an unclean exit, and a
-browser the power menu killed has recorded one. Marking every profile of the
-browser as cleanly exited before the relaunch lets --restore-last-session
-bring the tabs back; the session file itself survives the kill."""
+"""Chromium will not restore its tabs after an unclean exit, and a browser the
+power menu killed has recorded one. Marking its profiles as cleanly exited
+before the relaunch lets --restore-last-session work; the session file itself
+survives the kill."""
 
 import glob
 import json
@@ -14,7 +14,6 @@ USER_DATA_DIR_FLAG = "--user-data-dir="
 
 
 def mark_clean_exit(cls, cmd):
-    """Returns how many profiles were changed."""
     user_data_dir = find_user_data_dir(cls, cmd)
     if user_data_dir is None:
         return 0
@@ -24,7 +23,7 @@ def mark_clean_exit(cls, cmd):
 
 
 def find_user_data_dir(cls, cmd):
-    """The --user-data-dir the window was launched with, else the browser's default."""
+    """The --user-data-dir the window was launched with, else the default."""
     try:
         tokens = shlex.split(cmd)
     except ValueError:
@@ -35,7 +34,6 @@ def find_user_data_dir(cls, cmd):
 
 
 def set_exit_type_normal(path):
-    """True when the profile's Preferences file was changed."""
     try:
         with open(path, encoding="utf-8") as f:
             prefs = json.load(f)

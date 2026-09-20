@@ -9,20 +9,14 @@ STATE_DIR = os.environ.get("OMARCHY_LAST_SESSION_DIR") or os.path.join(
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 SESSION_FILE = os.path.join(STATE_DIR, "session.json")
 DISABLE_FLAG = os.path.join(STATE_DIR, "disabled")
-# The daemon overwrites session.json shortly after the next login; this copy
-# still says what was open at shutdown.
+# The daemon overwrites session.json soon after the next login; these two do not.
 LAST_SHUTDOWN_FILE = os.path.join(STATE_DIR, "last-shutdown.json")
-# What restore brought back, kept because the daemon overwrites session.json
-# soon after login.
 LAST_RESTORE_FILE = os.path.join(STATE_DIR, "last-restore.json")
-# One per running kitty instance: its OS windows, tabs, splits and working
-# directories, replayed by `kitty --session`. Written only for a kitty whose
-# remote control is on, and rewritten on every save.
 KITTY_SESSION_FILE = os.path.join(STATE_DIR, "kitty-{pid}.session")
 KITTY_SESSION_GLOB = os.path.join(STATE_DIR, "kitty-*.session")
 
-# Never saved or restored: add whatever your autostart already launches.
-EXCLUDE_CLASSES = {"org.quickshell", "xembedsniproxy"}
+# hyprland-dialog is the compositor's own, such as its "not responding" prompt.
+EXCLUDE_CLASSES = {"org.quickshell", "xembedsniproxy", "hyprland-dialog"}
 EXCLUDE_CLASSES |= {
     c.strip() for c in os.environ.get("OMARCHY_LAST_SESSION_EXCLUDE", "").split(",") if c.strip()
 }
@@ -38,15 +32,13 @@ TERMINALS = {
 TUI_PROGRAMS = {"yazi", "nvim", "vim", "btop", "htop", "ranger", "lf"}
 SHELLS = {"fish", "zsh", "bash", "sh", "nu"}
 KITTY_CLASS = "kitty"
-# yazi writes its directory into a file named per run; replaying that argument
-# would point the new instance at a file that is gone.
-CWD_FILE_FLAG = "--cwd-file"
-# Hands kitty a whole instance: every OS window of it comes back from one launch.
 KITTY_SESSION_FLAG = "--session"
+# yazi's directory file and LibreOffice's splash descriptor: named per run.
+PER_RUN_ARG_PREFIXES = ("--cwd-file", "--splash-pipe")
 
-# An AppImage mounts under a fresh random suffix on every launch.
+# An AppImage mounts under a fresh random suffix on every launch, and prefixes
+# the window class; its .desktop entry is not prefixed.
 APPIMAGE_MOUNT_PREFIX = "/tmp/.mount_"
-# AppImages prefix the window class; their .desktop entry is not prefixed.
 CLASS_PREFIXES = ("appimagekit-",)
 # A service invocation, not a way to reopen the window.
 DBUS_SERVICE_FLAG = "--gapplication-service"
@@ -59,10 +51,7 @@ DESKTOP_DIRS = (
     "/var/lib/flatpak/exports/share/applications",
 )
 
-# Chromium-based browsers: class -> user data directory under CONFIG_HOME.
-# Each is relaunched with --restore-last-session, and its profiles are marked
-# as cleanly exited first: Chromium refuses to restore after a crash, and a
-# browser the power menu killed has recorded one. XWayland reports Chromium;
+# class -> user data directory under CONFIG_HOME. XWayland reports Chromium;
 # native Wayland chromium or chromium-browser.
 CHROMIUM_BROWSERS = {
     "brave-browser": "BraveSoftware/Brave-Browser",
@@ -74,27 +63,23 @@ CHROMIUM_BROWSERS = {
 }
 RESTORE_FLAGS = dict.fromkeys(CHROMIUM_BROWSERS, "--restore-last-session")
 
-# Apps that reopen their own windows: launched once per process, since a second
-# launch of one adds an empty window, and asked to quit at shutdown so they
-# write their state down. Add your editor if it restores its own windows.
+# Sent SIGTERM at shutdown so they write their windows down. Add your editor if
+# it restores its own windows.
 SESSION_KEEPING_CLASSES = frozenset(RESTORE_FLAGS) | {"code", "code-oss", "code-insiders", "codium"}
+LIBREOFFICE_CLASSES = {"soffice"} | {
+    "libreoffice-" + app for app in ("writer", "calc", "impress", "draw", "math", "base", "startcenter")
+}
+# Launched once per process: a second launch joins the instance already running.
+# A SIGTERM to LibreOffice or GIMP raises a save prompt, so neither is sent one.
+SINGLE_INSTANCE_CLASSES = SESSION_KEEPING_CLASSES | LIBREOFFICE_CLASSES | {"gimp"}
 
 GRACEFUL_QUIT_TIMEOUT = 10
 DAEMON_INITIAL_DELAY = 90
-# The daemon sleeps on Hyprland's event socket and saves as soon as a window
-# appears or moves. Windows that vanished are saved only once the desktop has
-# been still for SETTLE_DELAY, which outlasts the two seconds between the power
-# menu closing every window and the poweroff. Titles and floating geometry
-# change without any event, so it also saves every SAVE_INTERVAL.
+# SETTLE_DELAY outlasts the two seconds between the power menu closing every
+# window and the poweroff, so a half-closed desktop is never saved.
 SETTLE_DELAY = 10
 SAVE_INTERVAL = 60
-# The sweep ends as soon as every window is accounted for, so only a window
-# that never appears pays the full wait.
 SWEEP_TIMEOUT = 30
-# A browser titles a window Untitled, New Tab or about:blank until its page
-# has loaded. Such a window is paired once its title says what it shows, or
-# after TITLE_SETTLE seconds.
 TITLE_SETTLE = 5
 SPAWN_STAGGER = 0.3
-# Restore refuses to run into a desktop with more windows than this open.
 MAX_PREEXISTING_WINDOWS = 3

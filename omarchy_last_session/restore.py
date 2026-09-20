@@ -1,6 +1,4 @@
-"""The restore pass: launch every saved window silently on its workspace, place
-the ones that escape process tracking, rebuild the groups, then put each
-workspace back on its monitor."""
+"""The restore pass: launch, sweep, group, then place workspaces on monitors."""
 
 import difflib
 import os
@@ -39,8 +37,7 @@ def sort_for_launch(windows):
 
 def launch_saved_windows(windows, origins, running):
     """Everything is launched before anything is waited for, so a slow app
-    overlaps with the rest instead of holding up the queue. A Chromium-based
-    browser not running yet is marked as cleanly exited before its launch."""
+    overlaps with the rest instead of holding up the queue."""
     for win in windows:
         if not win["spawn"]:
             continue
@@ -63,10 +60,8 @@ def build_exec_rules(win, origins):
 
 
 def get_saved_offset(win, origins):
-    """The window's offset into the monitor it was saved on. Hyprland reads a
-    move rule relative to the monitor and keeps that offset when the workspace
-    changes monitor, so the offset is what survives the monitor moving or
-    unplugging. A snapshot without monitor_at uses where that monitor is now."""
+    """The window's offset into the monitor it was saved on, which is what
+    survives that monitor moving in the layout or being unplugged."""
     ox, oy = win.get("monitor_at") or origins.get(win.get("monitor_name")) or (0, 0)
     return win["at"][0] - ox, win["at"][1] - oy
 
@@ -108,8 +103,7 @@ def sweep(pending, seen, origins):
 
 
 def place_new_arrivals(pending, seen, origins, first_seen, now, deadline):
-    """One pass over the desktop: pair each unseen window with a saved entry
-    and put it where that entry says. Updates pending and seen in place."""
+    """One pass over the desktop. Updates pending and seen in place."""
     placed = []
     for address, client in hypr.get_managed_clients().items():
         if address in seen:
@@ -133,9 +127,8 @@ def place_new_arrivals(pending, seen, origins, first_seen, now, deadline):
 
 
 def is_worth_waiting_for(client, first_seen_at, now, deadline):
-    """A browser titles a window Untitled, New Tab or about:blank until its
-    page has loaded, and that says nothing about which saved window it is. It
-    gets TITLE_SETTLE seconds, or what is left of the sweep, to say more."""
+    """A window still titled Untitled or New Tab says nothing about which saved
+    window it is, so it gets TITLE_SETTLE seconds to say more."""
     if not is_still_loading(client.get("title", "")):
         return False
     return now < min(first_seen_at + config.TITLE_SETTLE, deadline - 1)
@@ -153,8 +146,7 @@ def describe_pairing(entry, client, fixing):
 def match_saved_entry(pending, client):
     """The saved entry for a live window: by class, or failing that by the
     program behind it, since Chromium reports chromium-browser when relaunched
-    from a command line rather than from its desktop entry. A window nothing
-    matches is never placed and never grouped."""
+    from a command line rather than from its desktop entry."""
     live_argv = get_client_argv(client)
     candidates = [win for win in pending if win["class"] == client.get("class", "")]
     if not candidates:
@@ -166,12 +158,9 @@ def match_saved_entry(pending, client):
 
 
 def score_fit(win, client, live_argv):
-    """A window belongs to the process that runs its saved command, so that
-    comes first: two browsers of one class on different profiles are different
-    apps. Within one process only the titles tell windows apart, so the nearer
-    title wins. The workspace only breaks a tie: a browser opens its windows
-    wherever it likes, and trusting the workspace first fills two windows into
-    each other's places."""
+    """Command first, so two browsers on different profiles stay apart, then
+    title, then workspace. A browser opens its windows wherever it likes, so
+    trusting the workspace sooner fills two into each other's places."""
     return (
         score_command_match(win.get("cmd", ""), live_argv),
         score_title_likeness(win.get("title", ""), client.get("title", "")),
@@ -180,8 +169,8 @@ def score_fit(win, client, live_argv):
 
 
 def score_command_match(cmd, live_argv):
-    """2 when the process runs the saved command line, 1 when it runs the same
-    program, else 0. The restore flag is the plugin's own and is ignored."""
+    """2 for the same command line, 1 for the same program, else 0. The restore
+    flag is the plugin's own addition and is ignored."""
     try:
         saved = shlex.split(cmd)
     except ValueError:
@@ -200,11 +189,9 @@ PLACEHOLDER_PAGES = frozenset(("untitled", "new tab", "about:blank"))
 
 
 def score_title_likeness(saved, live):
-    """How close two titles are, since a page title drifts while the page is
-    open. The app's own name, which browsers append to every title, is left
-    out, and a title that only says the page is loading scores nothing, so it
-    cannot pick a saved entry by the app name alone. An app with no title
-    scores zero too and leaves the choice to the workspace."""
+    """How close two titles are, without the app name both end in. A title that
+    is still a placeholder, or missing, scores zero rather than match on the
+    app name alone."""
     saved_page, live_page = strip_shared_app_name(saved, live)
     if not saved_page or not live_page or is_placeholder(saved_page) or is_placeholder(live_page):
         return 0.0
@@ -212,8 +199,6 @@ def score_title_likeness(saved, live):
 
 
 def strip_shared_app_name(saved, live):
-    """Both titles without the ' - App' they both end in. A live title that is
-    only the app name has no page yet."""
     saved_page, saved_app = split_title(saved)
     live_page, live_app = split_title(live)
     if saved_app and live_app == saved_app:
@@ -254,8 +239,7 @@ def get_program_name_of(argv):
 
 
 def get_client_argv(client):
-    """The window's process command line. Chromium flattens its own into one
-    string, so it is split back the way save does."""
+    """The window's process command line, unflattened the way save does."""
     return relaunch.unflatten_argv(proc.read_cmdline(client.get("pid", -1)) or [])
 
 
@@ -269,8 +253,8 @@ def is_out_of_place(win, client, origins):
 
 
 def place_window(win, address, origins, floating=False):
-    """Silently move and shape an existing window to match its saved state.
-    `floating` is whether the window floats right now."""
+    """Move and shape a live window to match its saved state. `floating` says
+    whether it floats right now."""
     target = hypr.quote_window(address)
     if win["pinned"]:
         place_pinned_window(win, target, origins)
@@ -283,9 +267,8 @@ def place_window(win, address, origins, floating=False):
 
 
 def place_pinned_window(win, target, origins):
-    """A pinned window belongs to a monitor, not a workspace: moving its
-    workspace to another monitor leaves it behind, so it is placed by monitor
-    name. Unplugged since the snapshot, it lands wherever its workspace is."""
+    """A pinned window belongs to a monitor rather than a workspace, so it is
+    placed by monitor name, or by its workspace when that monitor is gone."""
     monitor = win.get("monitor_name")
     origin = origins.get(monitor)
     if origin is None:
@@ -320,8 +303,6 @@ def shape_floating_window(win, target, at):
 
 
 def build_groups(placed):
-    """Rebuild the saved groups from what the sweep placed. group:add takes an
-    existing window, so nothing here needs focus, a direction or a lock."""
     members = {}
     for win, address in placed:
         if win.get("group") is not None:
@@ -336,8 +317,7 @@ def build_groups(placed):
 
 
 def build_group(addresses):
-    """The first member becomes a group and the rest are added to it. A group
-    down to one window is not built."""
+    """The first member becomes a group and the rest are added to it."""
     if len(addresses) < 2:
         return False
     anchor = hypr.quote_window(addresses[0])
@@ -349,7 +329,7 @@ def build_group(addresses):
 
 def place_workspaces_on_monitors(windows):
     """Workspaces bind to no monitor, so at boot they pile onto the focused
-    one. Each is moved as a whole onto the monitor it was saved on, by name,
+    one. Each moves as a whole onto the monitor it was saved on, by name,
     since Hyprland renumbers monitors across boots."""
     if len(hypr.query("monitors")) < 2:
         return 0

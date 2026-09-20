@@ -1,15 +1,12 @@
 #!/bin/bash
 # Stand-in for a session-keeping browser: one process owning several windows,
 # which it reopens by itself when relaunched. The window count is its "session
-# file"; the test writes it. Every flag is ignored, --restore-last-session
-# included, as a browser ignores what it does not know.
+# file", written by the test. Every flag is ignored.
 #
-# Its app id changes after the first launch, as Chromium's does: started from
-# its desktop entry it is chromium, started from a bare command line, which is
-# how restore relaunches it, chromium-browser. The binary name never changes,
-# so that is what restore has to recognise it by.
-# Its titles drift between launches, as a page's title does while it is open,
-# so restore cannot tell its windows apart by an exact title.
+# Its app id changes after the first launch, as Chromium's does between its
+# desktop entry and a bare command line, so only the binary name identifies it.
+# Its titles drift between launches, as a page's title does, so restore cannot
+# match them exactly.
 launched="$HOME/.fakebrowser-launched"
 app_id=chromium
 suffix=""

@@ -1,10 +1,9 @@
 #!/bin/bash
-# Stand-in for Steam. Its window belongs to a helper it starts by relative
-# path, as the real client's belongs to ./steamwebhelper, so the command line
-# behind the window cannot be replayed and restore has to find the client
-# through a .desktop entry. Started with a game's URL, which is how every
-# shortcut Steam writes starts it, it opens that game's window too, under the
-# class Steam gives a running game.
+# Stand-in for Steam. Its window belongs to a helper started by relative path,
+# as the real client's belongs to ./steamwebhelper, so restore cannot replay
+# the command line and has to find the client through a .desktop entry. Given a
+# game's URL, which is how every shortcut Steam writes starts it, it opens that
+# game's window too.
 for arg in "$@"; do
     case $arg in
         steam://rungameid/*)
