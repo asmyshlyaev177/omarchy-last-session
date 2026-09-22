@@ -1,8 +1,8 @@
 # omarchy-last-session
 
-Reopen your last session's windows on login. An [Omarchy](https://omarchy.org) shell plugin for Hyprland 0.55+.
+Session restore for [Omarchy](https://omarchy.org): saves the windows you have open and brings them back after a reboot, shutdown, logout or crash. An Omarchy shell plugin for Hyprland 0.55+.
 
-Every window comes back on the workspace and monitor it was on. Floating windows keep their position and size. Pinned, fullscreen and grouped windows come back in that state. Terminals reopen in their last working directory, and browsers keep their tabs.
+Every window is restored on the workspace and monitor it was on. Floating windows keep their position and size. Pinned, fullscreen and grouped windows come back in that state. Terminals reopen in their last working directory, and browsers keep their tabs. Saving is automatic, so there is no save step before you power off.
 
 Python 3.9, standard library only. No compositor patches and no extra daemons.
 
@@ -14,7 +14,7 @@ Needs Omarchy 4 (Quattro) or newer.
 omarchy plugin add https://github.com/asmyshlyaev177/omarchy-last-session.git --enable
 ```
 
-It then saves whenever a window opens, closes or moves, and restores two seconds after the shell starts on your next login.
+It then saves a snapshot whenever a window opens, closes or moves, and restores it two seconds after the shell starts on your next login.
 
 If the command ends with `omarchy-shell is not responding`, the plugin is installed but may be left disabled. Check `omarchy plugin list` and run `omarchy plugin enable io.github.asmyshlyaev177.last-session`.
 

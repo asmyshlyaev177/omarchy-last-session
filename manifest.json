@@ -6,7 +6,7 @@
   "author": "Aleksandr Smyshliaev",
   "license": "MIT",
   "repository": "https://github.com/asmyshlyaev177/omarchy-last-session",
-  "description": "Reopens every window from your last session after a reboot or logout, on the workspace and monitor it was on, with floating geometry, groups, fullscreen and pinned state intact. Terminals reopen in their working directory; browsers keep their tabs. Snapshots within seconds of every change, so a reboot, a crash or the power button costs a few seconds at most, with nothing to wire up.",
+  "description": "Session restore: saves the windows and apps you have open and brings them back after a reboot, shutdown, logout or crash, each on the workspace and monitor it was on, with floating geometry, groups, fullscreen and pinned state intact. Terminals reopen in their working directory, browsers keep their tabs. Autosaves a snapshot within seconds of every change and restores it at startup on your next login, so you resume where you were with no save step before you power off.",
   "kinds": [
     "service"
   ],
