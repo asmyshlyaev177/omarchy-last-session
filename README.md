@@ -20,13 +20,13 @@ If the command ends with `omarchy-shell is not responding`, the plugin is instal
 
 ### Leave some windows out
 
-Set the classes your own autostart already launches in `~/.config/hypr/hyprland.lua`, so the service and the power menu both inherit them:
+Add the classes your own autostart already launches to `exclude` in `~/.config/omarchy/last-session.ini`, which the plugin writes the first time it runs:
 
-```lua
-hl.env("OMARCHY_LAST_SESSION_EXCLUDE", "my-autostarted-app,another-class")
+```ini
+exclude = my-autostarted-app, another-class
 ```
 
-Find a window's class with `hyprctl clients -j | jq '.[].class'`.
+Find a window's class with `hyprctl clients -j | jq '.[].class'`. The change takes effect within a minute. The other keys are under Configuration below, with the menu entry that opens the file.
 
 ## Update
 
@@ -38,14 +38,14 @@ omarchy plugin update io.github.asmyshlyaev177.last-session
 
 ```sh
 omarchy plugin remove io.github.asmyshlyaev177.last-session
-rm -r ~/.local/state/omarchy-last-session
+rm -r ~/.local/state/omarchy-last-session ~/.config/omarchy/last-session.ini
 ```
 
-Whatever you added by hand stays: the `hl.env` line above, and the power menu actions below.
+Whatever you added by hand stays: the power menu actions, and the menu entry below, which hides itself while the plugin is gone.
 
 ### What it writes
 
-Its own state directory, `~/.local/state/omarchy-last-session`, and one file belonging to another app: before relaunching a Chromium-based browser it sets `profile.exit_type` to `Normal` in each profile's `Preferences`, because Chromium will not restore tabs after what it recorded as a crash. Nothing else in that file changes.
+Its own state directory, `~/.local/state/omarchy-last-session`, its config file, `~/.config/omarchy/last-session.ini`, written once with the defaults, and one file belonging to another app: before relaunching a Chromium-based browser it sets `profile.exit_type` to `Normal` in each profile's `Preferences`, because Chromium will not restore tabs after what it recorded as a crash. Nothing else in that file changes.
 
 ## Let apps save before the power goes
 
@@ -53,13 +53,15 @@ Omarchy closes every window about two seconds before it powers off. Most apps ho
 
 ```jsonc
 {
-  "system.logout":   {"action":"~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-logout"},
-  "system.reboot":   {"action":"~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-reboot"},
-  "system.shutdown": {"action":"~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-shutdown"},
+  "system.logout": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-logout"},
+  "system.reboot": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-reboot"},
+  "system.shutdown": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-shutdown"},
 }
 ```
 
-Leave suspend and hibernate alone, they resume the live session. The menu reloads the file on save.
+The guard in each row means the plugin being removed changes nothing: the action skips straight to powering off. Leave suspend and hibernate alone, they resume the live session. The menu reloads the file on save.
+
+`~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session menu` prints these rows and the one below with the paths of your installation.
 
 ## What comes back
 
@@ -75,7 +77,7 @@ The plugin reopens windows. What is inside them comes from each app's own persis
 | kitty | its OS windows, tabs, splits and directories, with remote control on |
 | a terminal | the shell's last directory, or a TUI (`yazi`, `nvim`, `vim`, `btop`, `htop`, `ranger`, `lf`) in its own |
 
-Terminals supported out of the box: ghostty, kitty, foot, alacritty. Another is one line in `TERMINALS`.
+Terminals supported out of the box: ghostty, kitty, foot, alacritty. Another is one line under `[terminals]` in the config file.
 
 Turning kitty's remote control on is what lets it describe its tabs and splits:
 
@@ -97,28 +99,44 @@ Restore refuses to run when more than three windows are already open, so enablin
 
 ## Configuration
 
-Knobs in `omarchy_last_session/config.py`:
+The config file is `~/.config/omarchy/last-session.ini`. The plugin writes it the first time it runs, with every default it ships with and a comment on each, so what is in force is what the file says, and the apps it treats specially are there to add to. A saved change takes effect within a minute, with no restart. A key left out keeps its default, a section left out keeps its whole table, and a value the plugin cannot use is reported in the journal and ignored.
 
-| Knob | Meaning |
-| --- | --- |
-| `EXCLUDE_CLASSES` | window classes never saved or restored |
-| `TERMINALS` | terminal class → binary, working-directory flag, exec flag |
-| `TUI_PROGRAMS` | programs relaunched inside their terminal |
-| `CHROMIUM_BROWSERS` | Chromium-based browsers and their profile directories |
-| `SESSION_KEEPING_CLASSES` | apps `shutdown` sends SIGTERM to, so they write their windows down. Add your editor if it restores its own windows |
-| `SINGLE_INSTANCE_CLASSES` | apps launched once per process, because a second launch joins the first |
-| `SETTLE_DELAY` | how long vanished windows stay unsaved, 10 s |
-| `SAVE_INTERVAL` | how often the daemon saves when no event has said to, 60 s |
-| `SWEEP_TIMEOUT` | how long restore waits for windows, 30 s |
-| `TITLE_SETTLE` | how long a browser window still loading may wait for its title, 5 s |
-| `MAX_PREEXISTING_WINDOWS` | how many windows may already be open before restore refuses to run, 3 |
+`[general]`:
 
-Environment variables, read by every command:
+| Key | Meaning | Default |
+| --- | --- | --- |
+| `exclude` | window classes never saved or restored, besides the shell's own | |
+| `session_keeping` | apps that reopen their own windows: launched once per process, and sent SIGTERM by `shutdown` so they write their windows down first. Every browser under `[chromium-browsers]` is one too | `code, code-oss, code-insiders, codium` |
+| `single_instance` | apps launched once for all of their windows, because a second launch joins the first, but never signalled: a SIGTERM raises a save prompt | LibreOffice, `gimp` |
+| `tui_programs` | programs relaunched inside their terminal | `yazi, nvim, vim, btop, htop, ranger, lf` |
+| `shells` | what a terminal runs at its prompt; it reopens in that shell's directory | `fish, zsh, bash, sh, nu` |
+| `state_dir` | where snapshots are kept | `~/.local/state/omarchy-last-session` |
+| `settle_delay` | seconds vanished windows stay unsaved | `10` |
+| `save_interval` | seconds between saves when no window has opened, closed or moved | `60` |
+| `sweep_timeout` | seconds restore waits for the windows it launched | `30` |
+| `title_settle` | seconds a browser window still loading may take to show its title | `5` |
+| `max_preexisting_windows` | windows that may already be open before restore refuses to run | `3` |
 
-| Variable | Meaning |
-| --- | --- |
-| `OMARCHY_LAST_SESSION_EXCLUDE` | extra excluded classes, comma separated |
-| `OMARCHY_LAST_SESSION_DIR` | state directory, default `~/.local/state/omarchy-last-session` |
+Two tables, one row per window class:
+
+| Section | Row | Ships with |
+| --- | --- | --- |
+| `[terminals]` | `class = binary, working-directory flag[, flag that runs a program]` | kitty, foot, Alacritty, ghostty |
+| `[chromium-browsers]` | `class = profile directory under ~/.config`; each gets `--restore-last-session` and the clean-exit mark | Brave, Chromium, Chrome, Edge |
+
+Lists are comma separated. Quotes around a value are dropped, `#` after a value starts a comment, and a `state_dir` that is not absolute is taken from your home. Steam and AppImages need no entry: their command lines cannot be replayed, so each is relaunched through its `.desktop` entry.
+
+### Open it from the Omarchy menu
+
+Add this next to the power menu actions in `~/.config/omarchy/extensions/omarchy-menu.jsonc`, and the file is under *Setup › Config › Last Session*, where a search for "session" finds it. The `when` guard hides the row while the plugin directory is gone:
+
+```jsonc
+{
+  "setup.config.last-session": {"icon":"󰁯","label":"Last Session","when":"[[ -d ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session ]]","action":"~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session config"},
+}
+```
+
+The same `config` command from a terminal opens the file in your editor too, and `menu` prints this row and the power menu ones with the paths of your installation.
 
 To skip the next restore without disabling the plugin:
 
@@ -128,7 +146,7 @@ touch ~/.local/state/omarchy-last-session/disabled
 
 ## Command line
 
-Four commands, which work without the shell service. `restore` runs at login and `daemon` after it; `save` and `shutdown` are for your own scripts.
+Six commands, which work without the shell service. `restore` runs at login and `daemon` after it; `save` and `shutdown` are for your own scripts; `config` opens the config file in your editor; `menu` prints the rows for your menu file.
 
 ```sh
 ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session save
@@ -167,7 +185,7 @@ The code is the `omarchy_last_session` package; `bin/omarchy-last-session` only 
 
 | Module | What it holds |
 | --- | --- |
-| `config` | every knob |
+| `config` | every knob, and the config file that sets some of them |
 | `proc` | the `/proc` readers |
 | `hypr` | `hyprctl` requests, the event socket, Lua quoting, monitor and window views |
 | `relaunch` | recovery of a window's relaunch command |
@@ -175,7 +193,7 @@ The code is the `omarchy_last_session` package; `bin/omarchy-last-session` only 
 | `kitty` | a kitty instance's tabs and splits, rendered as a session file |
 | `session` | the snapshot file, the daemon's schedule, the graceful quit at shutdown |
 | `restore` | the restore pass |
-| `cli` | the four commands |
+| `cli` | the six commands |
 
 The unit tests need no compositor: `/proc` and `hyprctl` are read through named functions the tests substitute. The live tests drive the plugin against a real Hyprland in a container, with stand-in apps for the shapes that break restore.
 

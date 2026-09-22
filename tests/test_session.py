@@ -311,6 +311,17 @@ class KittySessions(StateDirCase):
         self.assertFalse(os.path.exists(stale))
         self.assertTrue(os.path.exists(self.path_for(7)))
 
+    def test_a_kitty_taken_out_of_the_terminals_table_gets_no_session_file(self):
+        """Without the table entry there is no binary to replay the file with,
+        so each of its windows is relaunched from its command line instead."""
+        with (
+            mock.patch.object(config, "TERMINALS", {}),
+            mock.patch.object(kitty, "build_session_text") as read,
+        ):
+            self.save_with([client("kitty", pid=7)], cmdline=("/usr/bin/kitty",))
+        read.assert_not_called()
+        self.assertEqual([w["cmd"] for w in self.read_session()], ["/usr/bin/kitty"])
+
     def test_another_terminal_is_left_alone(self):
         with mock.patch.object(kitty, "build_session_text") as read:
             self.save_with([client("com.mitchellh.ghostty", pid=7)])

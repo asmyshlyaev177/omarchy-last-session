@@ -80,7 +80,11 @@ def write_kitty_sessions(clients):
     """pid -> session file, for each kitty that describes itself. Files left by
     instances that are gone are dropped."""
     written = {}
-    pids = sorted({c["pid"] for c in clients if c.get("class") == config.KITTY_CLASS and c.get("pid")})
+    # A kitty taken out of [terminals] is relaunched like any other window.
+    known = config.KITTY_CLASS in config.TERMINALS
+    pids = sorted(
+        {c["pid"] for c in clients if known and c.get("class") == config.KITTY_CLASS and c.get("pid")}
+    )
     for pid in pids:
         text = kitty.build_session_text(pid)
         if text:

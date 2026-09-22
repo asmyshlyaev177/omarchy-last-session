@@ -6,7 +6,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 
 | Path | Role |
 | --- | --- |
-| `omarchy_last_session/config.py` | every knob and environment variable |
+| `omarchy_last_session/config.py` | every knob; `SETTINGS` is what the config file may set, each with the comment the plugin writes above it |
 | `omarchy_last_session/proc.py` | `/proc` readers |
 | `omarchy_last_session/hypr.py` | `hyprctl` requests, Lua quoting, monitor and window views, the socket2 `EventStream` |
 | `omarchy_last_session/relaunch.py` | recovers a window's relaunch command |
@@ -14,7 +14,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 | `omarchy_last_session/kitty.py` | reads a kitty instance over remote control, renders its session file |
 | `omarchy_last_session/session.py` | snapshot file, `SaveScheduler`, graceful quit at shutdown |
 | `omarchy_last_session/restore.py` | the restore pass, including the sweep that pairs live windows with saved ones |
-| `omarchy_last_session/cli.py` | the four commands `save`, `restore`, `shutdown`, `daemon` |
+| `omarchy_last_session/cli.py` | the six commands `save`, `restore`, `shutdown`, `daemon`, `config`, `menu` |
 | `tests/` | unit tests, one file per module, fixtures in `tests/helpers.py` |
 | `tests/integration/` | live suite against a real Hyprland in a container |
 | `docs/preview.html` | source of the marketplace `preview.png` |
@@ -24,18 +24,20 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 - `Service.qml` starts `restore` two seconds after the shell loads the plugin and starts `daemon` when restore exits. Both are children of the QML object, so a shell restart or a plugin disable ends them.
 - Restore refuses to run when more than `MAX_PREEXISTING_WINDOWS` (3) windows are open. Every hot reload of the installed plugin re-runs restore, which then aborts with "session already populated".
 - The daemon sleeps `DAEMON_INITIAL_DELAY` (90 s) before its first save, then wakes on placement events from Hyprland's socket2 and saves at most every `SAVE_INTERVAL` (60 s) otherwise. Vanished windows are written only after `SETTLE_DELAY` (10 s) of quiet, which outlasts Omarchy's close-all before poweroff.
-- State lives in `~/.local/state/omarchy-last-session`: `session.json`, `last-restore.json` (the snapshot restore used), `last-shutdown.json` (written by `shutdown` only), and the `disabled` flag. `OMARCHY_LAST_SESSION_DIR` overrides the directory.
+- State lives in `~/.local/state/omarchy-last-session`: `session.json`, `last-restore.json` (the snapshot restore used), `last-shutdown.json` (written by `shutdown` only), and the `disabled` flag. The `state_dir` setting overrides the directory.
 - Every state file goes through `session.open_private` and `session.write_private`: directory 0700, files 0600, no symlink followed, another user's directory refused. The marketplace review required this, so a new state file uses them too.
-- A kitty whose remote control is on gets a `kitty-<pid>.session` file in the state directory and a `kitty --session <path>` relaunch, which brings back its whole instance, so `session.does_launch_once` counts it. Without remote control there is no file and nothing changes. The file is one directive per line and pane titles come from whatever ran in the pane, so `kitty.is_one_line` keeps one from carrying a newline into it.
-- `SINGLE_INSTANCE_CLASSES` decides how many launches a process gets, `SESSION_KEEPING_CLASSES` who gets a SIGTERM at shutdown, and the second is a subset of the first. LibreOffice and GIMP are in the first only: a SIGTERM raises a save prompt and they come back offering document recovery.
-- Excluded classes come from `OMARCHY_LAST_SESSION_EXCLUDE`. On this machine it is set with `hl.env(...)` in `~/.config/hypr/hyprland.lua`, which is the only way the shell-spawned daemon inherits it.
+- A kitty taken out of `[terminals]` gets no session file and is relaunched per window from its command line (`session.write_kitty_sessions`), since the file's relaunch needs the table's binary. A kitty whose remote control is on gets a `kitty-<pid>.session` file in the state directory and a `kitty --session <path>` relaunch, which brings back its whole instance, so `session.does_launch_once` counts it. Without remote control there is no file and nothing changes. The file is one directive per line and pane titles come from whatever ran in the pane, so `kitty.is_one_line` keeps one from carrying a newline into it.
+- `SINGLE_INSTANCE_CLASSES` decides how many launches a process gets, `SESSION_KEEPING_CLASSES` who gets a SIGTERM at shutdown, and the second is a subset of the first by construction: session keeping is the `[chromium-browsers]` classes plus `session_keeping`, single instance is that plus `single_instance`. LibreOffice and GIMP are in the second list only: a SIGTERM raises a save prompt and they come back offering document recovery.
+- User settings come from `~/.config/omarchy/last-session.ini` (`config.CONFIG_FILE`, under `XDG_CONFIG_HOME`): INI so the file can carry comments. `[general]` holds the keys in `config.SETTINGS`; `[terminals]` and `[chromium-browsers]` are the tables in `config.TABLES`, one row per window class. `cli.main` writes the file with every default before its first command runs (`config.ensure_file`), which is the closest thing to "on install": Omarchy's installer runs no plugin code. A value in the file replaces its default outright, a section its whole table; only `exclude` is added to the shell's own classes, which stay hardcoded so a cleared list cannot make restore spawn a second shell. An unknown key or section, a number that is not one, or a table row that does not parse is warned about and skipped. A file that cannot be read at all (configparser error, bad UTF-8, a directory in its place) is warned about and leaves what was in force: the defaults at import, the last good read in the daemon, so a half-saved edit cannot send the next save to the default state dir. A deleted file means the defaults. Keys keep their case (`optionxform = str`) because window classes do, but section names and `[general]` keys match case-insensitively. Quotes around a value are dropped, `#` or `;` after a value is a comment, a relative `state_dir` is taken from home, a `~` in a profile dir is expanded so an absolute result wins the `os.path.join`. Numbers are bounded: `MINIMUMS` (save_interval at least 1, or the daemon spins) and `MAX_SECONDS` (10**9; `select` and `sleep` overflow at 2**63 ns and the daemon would die outside its retry). The environment variables `OMARCHY_LAST_SESSION_EXCLUDE` and `OMARCHY_LAST_SESSION_DIR` are gone.
+- The daemon calls `config.reload_if_changed` once per wake and re-reads the file when its mtime or size changed, so an edit lands within `SAVE_INTERVAL` without a restart. `restore`, `save` and `shutdown` are fresh processes and read it at import.
+- `config` opens the file through `omarchy-launch-config-editor`, which is what the README's `setup.config.last-session` menu entry runs; without that binary on PATH it names the file and exits 1. The menu reads only Omarchy's default JSONC and `~/.config/omarchy/extensions/omarchy-menu.jsonc`, so a plugin cannot add an entry itself, and nothing runs on removal to take one out. `menu` prints the rows (`cli.render_menu_rows`) with the paths of the copy that runs it, home written as `~`: the config row carries `when: [[ -d <plugin dir> ]]`, so it hides once the plugin is removed and the directory, unlike the launcher's path, is not something a layout change moves; the power rows override Omarchy's own and so never hide, and guard the shutdown call inside the action instead. `tests/test_cli.py` runs both guards through bash and checks the README shows exactly what the command prints for the standard install path.
 - `log()` writes to stdout and `warn()` to stderr. `Service.qml` forwards both to the journal. The live suite asserts that restore's stderr is empty, so a new diagnostic that is not an error goes through `log()`.
 - `chromium.mark_clean_exit` is the one write outside the state directory. It sets `profile.exit_type` to `Normal` in every `*/Preferences` under the browser's user data directory. The README discloses it, and the marketplace form was answered on that basis.
 
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests                                  # 261 tests, under a second
+python3 -m unittest discover -s tests                                  # 331 tests, under a second
 uv run --no-project --python 3.9 python -m unittest discover -s tests  # the CI's 3.9 leg
 uvx ruff check . && uvx ruff format --check .                          # config in pyproject.toml
 omarchy plugin validate .
@@ -54,11 +56,13 @@ Comments explain what a name cannot. No comment restates the line under it, no d
 
 ## Test conventions
 
+- `tests/__init__.py` points `config.CONFIG_FILE` at a file that does not exist and reloads, so the suite never reads this machine's config. It runs on the first `tests.` import, which comes after the package import in every test module, which is why it reloads rather than sets an environment variable. `ConfigFileCase` in `tests/helpers.py` gives a test a file of its own, reloaded on entry and on exit.
 - Tests patch at the module that owns the call, for example `hypr.query`, `proc.read_cmdline` or `config.TITLE_SETTLE`, never `subprocess` or `open`.
 - `tests/helpers.py` provides `client()`, `saved_window()`, `live_window()`, `grouped_clients()`, `pretend_runnable()` (patches `relaunch.is_runnable`, so no test depends on a binary being installed), `write_executable()` and `StateDirCase` (patches every state path and offers `save_with`, `read_session`, `write_session`).
 - `test_restore.py` runs the restore pass through a harness that records every dispatch, `eval_lua` and `mark_clean_exit` call in one list, so order across the pass is asserted, not just membership.
 - The daemon's event stream is tested against a real `socket.socketpair()`, which pins which events wake it and which are ignored.
 - A bug fix comes with a test named after the behaviour it pins.
+- The live suite's `run_script` writes the config file only when given a state dir; `test_the_config_file_is_written_on_first_run_and_an_edit_is_honoured` runs without one, so the launcher writes the template into the fake home and the test edits it as a user would.
 - `tests/integration/bin` holds the stand-in apps: a browser, an editor, Steam and an office suite. Each reproduces one shape restore has to handle, taken from what the real app does on this desktop.
 - Every session file `test_kitty.py` expects was replayed into a real kitty and the instance it built compared with the one it came from, so those shapes are what kitty does. Re-check against a real kitty before changing one.
 
@@ -75,6 +79,7 @@ omarchy-restart-shell
 The daemon's first save lands 90 s later. The README is public and does not carry this recipe.
 
 - Any file written under the installed directory hot-reloads the plugin: restore runs and aborts, and the daemon's 90 s delay starts again.
+- `~/.config/omarchy/last-session.ini` here excludes jobbot's browser classes and omacal, and `~/.config/omarchy/extensions/omarchy-menu.jsonc` holds the `setup.config.last-session` entry.
 - Find the daemon with `ps -C python3 -o pid,ppid,args | grep 'last-session daemon'`. A `pgrep -f` on that string also matches the shell running it.
 - `omarchy plugin add <url> --enable` prints "omarchy-shell is not responding" because `omarchy-shell` gives its IPC two seconds and the plugin reload takes longer. The request still lands, but the plugin may be left disabled, and `omarchy plugin enable <id>` fixes it.
 - Never edit anything under `/usr/share/omarchy`. Omarchy's own scripts are read there for reference only.

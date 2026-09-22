@@ -1,13 +1,15 @@
 import io
 import itertools
+import json
 import os
+import subprocess
 import sys
 import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import cli, hypr, proc, session
-from tests.helpers import StateDirCase, client, mode_of
+from omarchy_last_session import cli, config, hypr, log, proc, session
+from tests.helpers import ConfigFileCase, StateDirCase, client, mode_of, write_executable
 
 
 class Shutdown(StateDirCase):
@@ -51,7 +53,7 @@ class Shutdown(StateDirCase):
         self.assertEqual(self.read_session(self.copy), [])
 
 
-class Daemon(unittest.TestCase):
+class Daemon(ConfigFileCase):
     """The loop sleeps on the event stream, looks at the desktop each time it
     wakes, and stops when the compositor goes away."""
 
@@ -74,10 +76,31 @@ class Daemon(unittest.TestCase):
             mock.patch.object(hypr, "wait_for_placement_change", side_effect=wait),
             mock.patch.object(hypr, "get_layout", side_effect=layouts),
             mock.patch.object(session, "save_session", side_effect=save or itertools.count(1)) as saved,
+            mock.patch.object(sys, "stdout", io.StringIO()) as out,
             mock.patch.object(sys, "stderr", io.StringIO()) as err,
         ):
             cli.run_daemon()
+        self.logged = out.getvalue()
         return saved.call_count, waits, err.getvalue()
+
+    def test_an_edited_config_file_is_read_at_the_next_wake(self):
+        """Saved at 1000, asked at 1005 how long to sleep: the file's interval
+        says 2, the default would say 55."""
+        self.write_config({"save_interval": 7})
+        _, waits, _ = self.run_wakes([self.A])
+        self.assertEqual(waits, [2])
+        self.assertIn(f"reloaded {config.CONFIG_FILE}", self.logged)
+
+    def test_an_unchanged_file_is_not_announced(self):
+        self.run_wakes([self.A, self.A])
+        self.assertNotIn("reloaded", self.logged)
+
+    def test_a_log_line_reaches_the_pipe_at_once(self):
+        """The daemon runs for the whole session, so a buffered line would
+        reach the journal only when the session ends."""
+        with mock.patch.object(sys, "stdout", mock.Mock()) as out:
+            log("something")
+        out.flush.assert_called()
 
     def test_saves_on_the_first_look_and_then_only_on_a_change(self):
         saves, _, _ = self.run_wakes([self.A, self.A, self.AB])
@@ -97,6 +120,126 @@ class Daemon(unittest.TestCase):
         saves, _, err = self.run_wakes([self.A, self.A], save=[OSError("disk full"), 1])
         self.assertEqual(saves, 2)
         self.assertIn("save failed: disk full", err)
+
+
+class ConfigFile(ConfigFileCase):
+    """Written with every default and a comment on each the first time the
+    plugin runs, so the menu entry always opens a file worth reading."""
+
+    def run_save(self):
+        with (
+            mock.patch.object(session, "save_session", return_value=0),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+        ):
+            self.assertEqual(cli.main(["save"]), 0)
+
+    def test_the_first_run_writes_the_template(self):
+        self.run_save()
+        with open(config.CONFIG_FILE) as f:
+            self.assertEqual(f.read(), config.render_template())
+
+    def test_the_plugins_own_write_is_not_taken_for_an_edit(self):
+        self.run_save()
+        self.assertFalse(config.reload_if_changed())
+
+    def test_an_existing_file_is_left_as_it_is(self):
+        self.write_config({"exclude": ["mine"]})
+        self.run_save()
+        self.assertEqual(config.load_file()["exclude"], ["mine"])
+
+    def test_config_hands_the_file_to_the_config_editor(self):
+        with mock.patch.object(os, "execvp") as execvp:
+            self.assertEqual(cli.main(["config"]), 0)
+        execvp.assert_called_once_with(cli.CONFIG_EDITOR, [cli.CONFIG_EDITOR, config.CONFIG_FILE])
+        self.assertTrue(os.path.exists(config.CONFIG_FILE))
+
+    def test_config_without_omarchys_editor_names_the_file_and_fails(self):
+        """Off an Omarchy desktop, or from a stripped PATH: no traceback."""
+        with (
+            mock.patch.object(os, "execvp", side_effect=FileNotFoundError),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.assertEqual(cli.main(["config"]), 1)
+        self.assertIn(config.CONFIG_FILE, err.getvalue())
+
+    def test_a_state_dir_that_cannot_be_made_fails_the_save_and_not_the_daemon(self):
+        blocker = os.path.join(self.config_dir.name, "blocker")
+        open(blocker, "w").close()
+        self.write_config({"state_dir": os.path.join(blocker, "state")})
+        config.reload()
+        with (
+            mock.patch.object(hypr, "query", return_value=[]),
+            mock.patch.object(hypr, "get_layout", return_value={}),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.assertEqual(cli.save_if_due(session.SaveScheduler()), config.SAVE_INTERVAL)
+        self.assertIn("save failed", err.getvalue())
+
+
+class MenuRows(ConfigFileCase):
+    """`menu` prints what to paste into the menu file, with the paths of the
+    copy that printed it, so a moved plugin never leaves a stale row."""
+
+    ROOT = "~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session"
+
+    def rows(self, root=ROOT):
+        text = cli.render_menu_rows(root)
+        return json.loads("{" + text.rstrip().rstrip(",") + "}")
+
+    def test_the_rows_are_the_four_the_readme_asks_for(self):
+        self.assertEqual(
+            set(self.rows()),
+            {"setup.config.last-session", "system.logout", "system.reboot", "system.shutdown"},
+        )
+
+    def test_the_config_row_hides_with_the_plugin_directory(self):
+        """The directory outlives any move of the launcher inside it."""
+        row = self.rows()["setup.config.last-session"]
+        self.assertEqual(row["when"], f"[[ -d {self.ROOT} ]]")
+        self.assertEqual(row["action"], f"{self.ROOT}/bin/omarchy-last-session config")
+        self.assertEqual(row["label"], "Last Session")
+
+    def test_the_power_rows_power_off_with_or_without_the_plugin(self):
+        for power in ("logout", "reboot", "shutdown"):
+            action = self.rows()[f"system.{power}"]["action"]
+            self.assertTrue(action.startswith(f"[[ -x {self.ROOT}/bin/omarchy-last-session ]] && "), action)
+            self.assertTrue(action.endswith(f" shutdown; omarchy-system-{power}"), action)
+
+    def test_the_guards_hold_when_bash_runs_them(self):
+        root = os.path.join(self.config_dir.name, "plugin")
+        launcher = os.path.join(root, "bin", "omarchy-last-session")
+        write_executable(launcher)
+        with open(launcher, "a") as f:
+            f.write('echo "$1"\n')
+        present, gone = self.rows(root), self.rows(root + "-gone")
+        self.assertEqual(self.bash(present["setup.config.last-session"]["when"]).returncode, 0)
+        self.assertNotEqual(self.bash(gone["setup.config.last-session"]["when"]).returncode, 0)
+        for rows, expected in ((present, "shutdown\npowered off\n"), (gone, "powered off\n")):
+            action = rows["system.logout"]["action"].replace("omarchy-system-logout", "echo powered off")
+            done = self.bash(action)
+            self.assertEqual((done.stdout, done.stderr), (expected, ""))
+
+    def bash(self, script):
+        return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+    def test_the_command_prints_the_rows_for_the_copy_it_runs_from(self):
+        with mock.patch.object(sys, "stdout", io.StringIO()) as out:
+            self.assertEqual(cli.main(["menu"]), 0)
+        self.assertEqual(out.getvalue(), cli.render_menu_rows(cli.tilde(cli.PLUGIN_DIR)))
+        self.assertTrue(os.path.isfile(os.path.join(cli.PLUGIN_DIR, "manifest.json")), cli.PLUGIN_DIR)
+
+    def test_home_is_written_as_a_tilde(self):
+        self.assertEqual(cli.tilde(os.path.expanduser("~/.config/x")), "~/.config/x")
+        self.assertEqual(cli.tilde(os.path.expanduser("~")), "~")
+        self.assertEqual(cli.tilde("/opt/x"), "/opt/x")
+        self.assertEqual(cli.tilde(os.path.expanduser("~") + "2/x"), os.path.expanduser("~") + "2/x")
+
+    def test_the_readme_shows_the_rows_the_command_prints(self):
+        """One source: the snippet users copy is the standard install's output."""
+        with open(os.path.join(cli.PLUGIN_DIR, "README.md")) as f:
+            readme = f.read()
+        for line in cli.render_menu_rows(self.ROOT).splitlines():
+            self.assertIn(line, readme)
 
 
 class Usage(unittest.TestCase):

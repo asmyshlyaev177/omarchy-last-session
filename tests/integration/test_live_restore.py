@@ -196,12 +196,18 @@ class Compositor:
             raise AssertionError("kitten {} failed: {}{}".format(" ".join(args), done.stdout, done.stderr))
         return done.stdout if done.returncode == 0 else ""
 
-    def run_script(self, action, state_dir):
-        env = dict(
-            self.env,
-            OMARCHY_LAST_SESSION_DIR=state_dir,
-            OLS_HYPRCTL_LOG=os.path.join(self.home, "hyprctl.log"),
-        )
+    def config_file(self):
+        return os.path.join(self.home, ".config", "omarchy", "last-session.ini")
+
+    def run_script(self, action, state_dir=None):
+        """The state directory reaches the script the way it does on a
+        desktop: through the config file under XDG_CONFIG_HOME. Without one
+        the file is left as it is, or as the script itself writes it."""
+        if state_dir is not None:
+            os.makedirs(os.path.dirname(self.config_file()), exist_ok=True)
+            with open(self.config_file(), "w") as f:
+                f.write(f"[general]\nstate_dir = {state_dir}\n")
+        env = dict(self.env, OLS_HYPRCTL_LOG=os.path.join(self.home, "hyprctl.log"))
         return subprocess.run(
             [sys.executable, SCRIPT, action], env=env, capture_output=True, text=True, timeout=180
         )
@@ -429,6 +435,56 @@ class LiveRestore(unittest.TestCase):
         with self.subTest("the browser's crashed exit was marked clean before its relaunch"):
             with open(prefs) as f:
                 self.assertEqual(json.load(f)["profile"]["exit_type"], "Normal")
+
+    def test_the_config_file_is_written_on_first_run_and_an_edit_is_honoured(self):
+        """A fresh login has no config file: the first run writes one holding
+        every default with a comment on each, and a class added to its exclude
+        line is neither saved nor restored from then on. The whole path runs
+        as it does on a desktop: the launcher, a real home, the shipped
+        template read back by the interpreter the desktop has."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        c.open_window("foot --app-id=notes")
+        c.open_window("foot --app-id=keep")
+        state = os.path.join(c.home, ".local", "state", "omarchy-last-session", "session.json")
+
+        first = c.run_script("save")
+        self.assertEqual((first.returncode, first.stderr), (0, ""), first.stdout + first.stderr)
+        with open(c.config_file()) as f:
+            template = f.read()
+        for expected in (
+            "[general]\n",
+            "\nexclude =\n",
+            "\n[terminals]\n",
+            "\nfoot = foot, -D\n",
+            "\n[chromium-browsers]\n",
+        ):
+            self.assertIn(expected, template)
+        self.assertGreater(template.count("\n# "), 20, "every setting should come with its comment")
+        with open(state) as f:
+            before = json.load(f)
+        self.assertEqual({w["class"] for w in before["windows"]}, {"notes", "keep"})
+
+        with open(c.config_file(), "w") as f:
+            f.write(template.replace("\nexclude =\n", "\nexclude = notes\n", 1))
+        second = c.run_script("save")
+        self.assertEqual((second.returncode, second.stderr), (0, ""), second.stdout + second.stderr)
+        with open(state) as f:
+            self.assertEqual({w["class"] for w in json.load(f)["windows"]}, {"keep"})
+
+        # An older snapshot still holds the window; restore leaves it out too.
+        with open(state, "w") as f:
+            json.dump(before, f)
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore")
+        self.assertEqual(
+            (restored.returncode, restored.stderr), (0, ""), restored.stdout + c.log_tail("hyprland")
+        )
+        wait_for(lambda: {w["class"] for w in c.clients()} == {"keep"} or None, "the kept window alone")
+        time.sleep(2)
+        self.assertEqual({w["class"] for w in c.clients()}, {"keep"})
 
     def test_two_windows_of_one_browser_keep_their_own_monitors(self):
         """One process, two windows, the same class: only their titles say

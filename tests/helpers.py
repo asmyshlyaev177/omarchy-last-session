@@ -5,10 +5,12 @@ those at the module that owns them (proc, hypr, config) and the code under
 test sees the fake through the module attribute. Nothing mocks Hyprland itself.
 """
 
+import io
 import itertools
 import json
 import os
 import stat
+import sys
 import tempfile
 import unittest
 from unittest import mock
@@ -114,6 +116,49 @@ def write_executable(path):
 def mode_of(path):
     """Permission bits of the path itself, a symlink included."""
     return stat.S_IMODE(os.lstat(path).st_mode)
+
+
+def render_ini(sections):
+    """Lists become comma separated values."""
+    text = ""
+    for name, entries in sections.items():
+        text += f"[{name}]\n"
+        for key, value in entries.items():
+            text += f"{key} = {', '.join(value) if isinstance(value, list) else value}\n"
+    return text
+
+
+class ConfigFileCase(unittest.TestCase):
+    """A config file of the test's own, absent until written, with the
+    defaults back in force afterwards."""
+
+    def setUp(self):
+        self.config_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.config_dir.cleanup)
+        # Registered before the patch so it runs after the patch is undone.
+        self.addCleanup(config.reload)
+        path = os.path.join(self.config_dir.name, "last-session.ini")
+        patcher = mock.patch.object(config, "CONFIG_FILE", path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        config.reload()
+
+    def write_config(self, content):
+        """A string is written as it is. In a dict, a dict value is a table
+        section of its own and everything else goes under [general]."""
+        if not isinstance(content, str):
+            general = {key: value for key, value in content.items() if not isinstance(value, dict)}
+            tables = {key: value for key, value in content.items() if isinstance(value, dict)}
+            content = render_ini({config.SECTION: general, **tables})
+        with open(config.CONFIG_FILE, "w") as f:
+            f.write(content)
+
+    def reload_with(self, content):
+        """Writes and reloads; returns what was warned."""
+        self.write_config(content)
+        with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+            config.reload()
+        return err.getvalue()
 
 
 class StateDirCase(unittest.TestCase):

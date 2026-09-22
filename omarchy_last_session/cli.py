@@ -6,16 +6,28 @@ shutdown - save, then let session-keeping apps exit cleanly; optional, for a
 restore  - relaunch every saved window silently on its original workspace
 daemon   - save when Hyprland reports a window moving, so a power button, a
            crash or the power menu costs a few seconds of changes at most
+config   - open the config file in your editor; the daemon picks an edit up
+           within a minute
+menu     - print the rows for ~/.config/omarchy/extensions/omarchy-menu.jsonc:
+           the config file under Setup > Config, and the power menu actions
 
-State lives in $XDG_STATE_HOME/omarchy-last-session (override: $OMARCHY_LAST_SESSION_DIR).
+Config lives in $XDG_CONFIG_HOME/omarchy/last-session.ini, written with every default
+and a comment on each the first time the plugin runs.
+State lives in $XDG_STATE_HOME/omarchy-last-session, or the state_dir set there.
 Skip the next restore:   touch <state dir>/disabled
-Extra excluded classes:  OMARCHY_LAST_SESSION_EXCLUDE="class1,class2"
 """
 
+import os
 import sys
 import time
 
-from omarchy_last_session import config, hypr, restore, session, warn
+from omarchy_last_session import config, hypr, log, restore, session, warn
+
+# Omarchy's own: opens the user's editor and shows a toast, as the Config menu entries do.
+CONFIG_EDITOR = "omarchy-launch-config-editor"
+MENU_ICON = "󰁯"
+# The checkout: where the launcher, the manifest and this package live.
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def run_save():
@@ -43,9 +55,46 @@ def run_daemon():
         pass
 
 
+def run_config():
+    try:
+        os.execvp(CONFIG_EDITOR, [CONFIG_EDITOR, config.CONFIG_FILE])
+    except FileNotFoundError:
+        warn(f"{CONFIG_EDITOR} is not on PATH, so open the file yourself: {config.CONFIG_FILE}")
+        return 1
+
+
+def run_menu():
+    print(render_menu_rows(tilde(PLUGIN_DIR)), end="")
+
+
+def render_menu_rows(root):
+    """JSONC rows for the user's menu file. The config row hides itself while
+    the plugin directory is gone: the directory outlives any move of the
+    launcher inside it. The power rows override Omarchy's own, so they never
+    hide; without the plugin they skip straight to powering off."""
+    launcher = f"{root}/bin/omarchy-last-session"
+    rows = [
+        f'  "setup.config.last-session": {{"icon":"{MENU_ICON}","label":"Last Session",'
+        f'"when":"[[ -d {root} ]]","action":"{launcher} config"}},'
+    ]
+    for power in ("logout", "reboot", "shutdown"):
+        action = f"[[ -x {launcher} ]] && {launcher} shutdown; omarchy-system-{power}"
+        rows.append(f'  "system.{power}": {{"action":"{action}"}},')
+    return "\n".join(rows) + "\n"
+
+
+def tilde(path):
+    """~ for the home directory, which the menu's bash expands, so the rows read
+    the same on every machine."""
+    home = os.path.expanduser("~")
+    return "~" + path[len(home) :] if path == home or path.startswith(home + os.sep) else path
+
+
 def save_if_due(scheduler):
     """Returns how long the daemon may sleep before looking again."""
     try:
+        if config.reload_if_changed():
+            log(f"reloaded {config.CONFIG_FILE}")
         now = time.monotonic()
         if scheduler.is_due(hypr.get_layout(), now):
             session.save_session()
@@ -61,6 +110,8 @@ COMMANDS = {
     "shutdown": run_shutdown,
     "restore": restore.restore_session,
     "daemon": run_daemon,
+    "config": run_config,
+    "menu": run_menu,
 }
 
 
@@ -70,5 +121,5 @@ def main(argv=None):
     if command is None:
         print(__doc__.strip(), file=sys.stderr)
         return 1
-    command()
-    return 0
+    config.ensure_file()
+    return command() or 0
