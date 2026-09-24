@@ -673,6 +673,50 @@ class LiveRestore(unittest.TestCase):
                 self.assertGreaterEqual(c["at"][0], only["x"], self.comp.requests())
                 self.assertLess(c["at"][0], only["x"] + only["width"], self.comp.requests())
 
+    def test_a_renamed_workspace_comes_back_under_its_number(self):
+        """A numbered workspace the user renamed keeps its number: the bar
+        lists it by that. Restored as name:Home it would be a new named
+        workspace with a negative id, which the bar hides."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        c.dispatch("hl.dsp.workspace.rename({ workspace = '1', name = 'Home' })")
+        c.open_window("foot --app-id=notes")
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual([w["workspace"] for w in saved["windows"]], [{"id": 1, "name": "Home"}])
+
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        after = self.snapshot("save", "state-after")
+        self.assertEqual(
+            [w["workspace"] for w in after["windows"]], [{"id": 1, "name": "Home"}], c.requests()
+        )
+        self.assertEqual([w["id"] for w in c.json("workspaces") if w["name"] == "Home"], [1], c.requests())
+
+    def test_a_workspace_renamed_again_comes_back_under_its_latest_name(self):
+        """Home became Home1 during the session, so Home1 is what comes back."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        c.dispatch("hl.dsp.workspace.rename({ workspace = '1', name = 'Home' })")
+        c.open_window("foot --app-id=notes")
+        c.dispatch("hl.dsp.workspace.rename({ workspace = '1', name = 'Home1' })")
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual([w["workspace"] for w in saved["windows"]], [{"id": 1, "name": "Home1"}])
+
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        after = self.snapshot("save", "state-after")
+        self.assertEqual(
+            [w["workspace"] for w in after["windows"]], [{"id": 1, "name": "Home1"}], c.requests()
+        )
+        named = [(w["id"], w["name"]) for w in c.json("workspaces") if w["name"].startswith("Home")]
+        self.assertEqual(named, [(1, "Home1")], c.requests())
+
 
 if __name__ == "__main__":
     unittest.main()

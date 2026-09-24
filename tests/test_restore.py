@@ -760,6 +760,12 @@ class WorkspaceNaming(unittest.TestCase):
     def test_workspace_already_carrying_its_name_is_left_alone(self):
         self.assertEqual(self.emit([self.named(3, "web")], [{"id": 3, "name": "web"}]), (0, []))
 
+    def test_workspace_carrying_another_name_is_renamed_to_the_saved_one(self):
+        self.assertEqual(
+            self.emit([self.named(1, "Home1")], [{"id": 1, "name": "Home"}]),
+            (1, ["hl.dsp.workspace.rename({ workspace = '1', name = 'Home1' })"]),
+        )
+
     def test_workspace_that_never_came_back_is_skipped(self):
         self.assertEqual(self.emit([self.named(3, "web")], [{"id": 1, "name": "1"}]), (0, []))
 
