@@ -12,7 +12,11 @@ from omarchy_last_session import config, hypr
 
 class WorkspaceSelector(unittest.TestCase):
     def test_named_workspace(self):
-        self.assertEqual(hypr.format_workspace_selector({"id": 4, "name": "code"}), "name:code")
+        self.assertEqual(hypr.format_workspace_selector({"id": -1337, "name": "code"}), "name:code")
+
+    def test_renamed_numbered_workspace_goes_by_its_number(self):
+        # name:code would open a new named workspace, numbered below zero
+        self.assertEqual(hypr.format_workspace_selector({"id": 4, "name": "code"}), "4")
 
     def test_numbered_workspace(self):
         self.assertEqual(hypr.format_workspace_selector({"id": 4, "name": "4"}), "4")

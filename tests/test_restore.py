@@ -724,6 +724,71 @@ class WorkspaceMonitorPlacement(unittest.TestCase):
         self.assertEqual(self.emit(wins, self.TWO, [-99]), (0, []))
 
 
+class WorkspaceNaming(unittest.TestCase):
+    """A renamed numbered workspace is restored by its number, which Hyprland
+    recreates unnamed, so its saved name is put back afterwards."""
+
+    def emit(self, windows, live):
+        with (
+            mock.patch.object(hypr, "query", return_value=live),
+            mock.patch.object(hypr, "dispatch") as dispatched,
+        ):
+            renamed = restore.name_workspaces(windows)
+        return renamed, [c.args[0] for c in dispatched.call_args_list]
+
+    @staticmethod
+    def named(ws, name):
+        win = saved_window("x", ws=ws)
+        win["workspace"]["name"] = name
+        return win
+
+    def test_each_renamed_workspace_gets_its_name_back_once(self):
+        wins = [self.named(1, "Home"), self.named(2, "it's"), self.named(1, "Home")]
+        renamed, emitted = self.emit(wins, [{"id": 1, "name": "1"}, {"id": 2, "name": "2"}])
+        self.assertEqual(renamed, 2)
+        self.assertEqual(
+            emitted,
+            [
+                "hl.dsp.workspace.rename({ workspace = '1', name = 'Home' })",
+                "hl.dsp.workspace.rename({ workspace = '2', name = 'it\\'s' })",
+            ],
+        )
+
+    def test_workspace_named_after_its_number_is_left_alone(self):
+        self.assertEqual(self.emit([saved_window("x", ws=3)], [{"id": 3, "name": "3"}]), (0, []))
+
+    def test_workspace_already_carrying_its_name_is_left_alone(self):
+        self.assertEqual(self.emit([self.named(3, "web")], [{"id": 3, "name": "web"}]), (0, []))
+
+    def test_workspace_carrying_another_name_is_renamed_to_the_saved_one(self):
+        self.assertEqual(
+            self.emit([self.named(1, "Home1")], [{"id": 1, "name": "Home"}]),
+            (1, ["hl.dsp.workspace.rename({ workspace = '1', name = 'Home1' })"]),
+        )
+
+    def test_workspace_that_never_came_back_is_skipped(self):
+        self.assertEqual(self.emit([self.named(3, "web")], [{"id": 1, "name": "1"}]), (0, []))
+
+    def test_named_and_special_workspaces_are_skipped(self):
+        wins = [self.named(-1337, "scratch"), self.named(-98, "special:magic")]
+        live = [{"id": -1337, "name": "scratch"}, {"id": -98, "name": "special:magic"}]
+        self.assertEqual(self.emit(wins, live), (0, []))
+
+
+class WorkspaceNamingInRestore(RestoreHarness):
+    def test_a_renamed_workspace_is_launched_by_number_and_renamed(self):
+        win = saved_window("code", ws=1)
+        win["workspace"]["name"] = "Home"
+        self.write_session([win])
+        with mock.patch.object(hypr, "query", return_value=[{"id": 1, "name": "1"}]):
+            emitted = self.run_restore(
+                [{}, {"0xa": {"class": "code", "workspace": {"id": 1}}}], sweep_timeout=5
+            )
+        self.assertIn("workspace = '1 silent'", emitted[0])
+        self.assertNotIn("name:", emitted[0])
+        self.assertEqual(emitted[-1], "hl.dsp.workspace.rename({ workspace = '1', name = 'Home' })")
+
+
 class MonitorPlacementInRestore(RestoreHarness):
     """The pass is wired into restore after everything has been placed: a
     workspace with no window yet on it would move back on its own."""

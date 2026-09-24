@@ -315,6 +315,7 @@ class KittySessions(StateDirCase):
         """Without the table entry there is no binary to replay the file with,
         so each of its windows is relaunched from its command line instead."""
         with (
+            pretend_runnable(),
             mock.patch.object(config, "TERMINALS", {}),
             mock.patch.object(kitty, "build_session_text") as read,
         ):
