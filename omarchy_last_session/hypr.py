@@ -79,9 +79,13 @@ def quote_window(address):
 
 
 def format_workspace_selector(workspace):
-    """A hyprctl workspace dict as a selector: its number, name:x, or special:x."""
-    name = workspace.get("name", "")
-    if name.startswith("special") or name == str(workspace.get("id", 0)):
+    """A hyprctl workspace dict as a selector: its number, name:x, or special:x.
+    A numbered workspace goes by its number even when it has been renamed:
+    name:x would make a new named workspace, which Hyprland numbers below zero."""
+    name, number = workspace.get("name", ""), workspace.get("id", 0)
+    if isinstance(number, int) and number > 0:
+        return str(number)
+    if name.startswith("special"):
         return name
     return f"name:{name}"
 

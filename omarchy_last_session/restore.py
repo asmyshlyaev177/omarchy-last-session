@@ -1,4 +1,4 @@
-"""The restore pass: launch, sweep, group, then place workspaces on monitors."""
+"""The restore pass: launch, sweep, group, then name workspaces and place them on monitors."""
 
 import difflib
 import os
@@ -26,6 +26,7 @@ def restore_session():
     for win in missing:
         warn(f"no window turned up for {win['class']}")
     build_groups(placed)
+    name_workspaces(windows)
     place_workspaces_on_monitors(windows)
 
 
@@ -325,6 +326,24 @@ def build_group(addresses):
     for address in addresses[1:]:
         hypr.eval_lua(f"hl.get_window({anchor}).group:add(hl.get_window({hypr.quote_window(address)}))")
     return True
+
+
+def name_workspaces(windows):
+    """A numbered workspace is recreated by its number, which comes back with
+    no name, so the name it was saved under is put back on it."""
+    live = {w.get("id"): w.get("name") for w in hypr.query("workspaces")}
+    wanted = {}
+    for win in windows:
+        number, name = win["workspace"].get("id"), win["workspace"].get("name", "")
+        if isinstance(number, int) and number > 0 and name and name != str(number) and number in live:
+            wanted.setdefault(number, name)
+    renamed = 0
+    for number, name in wanted.items():
+        if live[number] != name:
+            selector, quoted = hypr.quote_lua(str(number)), hypr.quote_lua(name)
+            hypr.dispatch(f"hl.dsp.workspace.rename({{ workspace = {selector}, name = {quoted} }})")
+            renamed += 1
+    return renamed
 
 
 def place_workspaces_on_monitors(windows):
