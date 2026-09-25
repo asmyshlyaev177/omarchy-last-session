@@ -2,8 +2,12 @@
 
 import os
 
-from omarchy_last_session import config, hypr, session, warn
+from omarchy_last_session import config, hypr, notification, session, warn
 from omarchy_last_session.restore import launch, layout, sweep
+
+TOAST_SUMMARY = "Restoring last session\u2026"
+# nf-md-window_restore, from the Nerd Font Omarchy draws its toast glyphs with.
+TOAST_GLYPH = "\U000f05b2"
 
 
 def restore_session():
@@ -17,15 +21,25 @@ def restore_session():
         warn("session already populated, aborting")
         return
     session.keep_restore_copy()
-    origins = hypr.get_monitor_origins()
-    ordered = launch.sort_for_launch(windows)
-    launch.launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
-    placed, missing = sweep.sweep(ordered, set(already_open), origins)
-    for win in missing:
-        warn(describe_missing(win, placed, missing))
-    layout.build_groups(placed)
-    layout.name_workspaces(windows)
-    layout.place_workspaces_on_monitors(windows)
+    with show_toast(windows):
+        origins = hypr.get_monitor_origins()
+        ordered = launch.sort_for_launch(windows)
+        launch.launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
+        placed, missing = sweep.sweep(ordered, set(already_open), origins)
+        for win in missing:
+            warn(describe_missing(win, placed, missing))
+        layout.build_groups(placed)
+        layout.name_workspaces(windows)
+        layout.place_workspaces_on_monitors(windows)
+
+
+def show_toast(windows):
+    count = len(windows)
+    # Every launch, the sweep waited out, and a moment for the grouping and
+    # moves after it: the toast outlives the pass only when restore is killed.
+    seconds = count * config.SPAWN_STAGGER + config.SWEEP_TIMEOUT + 5
+    body = f"Reopening {count} window{'' if count == 1 else 's'}"
+    return notification.showing(TOAST_SUMMARY, body, TOAST_GLYPH, seconds)
 
 
 def describe_missing(win, placed, missing):

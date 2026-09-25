@@ -194,6 +194,7 @@ The code is the `omarchy_last_session` package; `bin/omarchy-last-session` only 
 | `kitty` | a kitty instance's tabs and splits, rendered as a session file |
 | `session` | the snapshot file, the daemon's schedule, the graceful quit at shutdown |
 | `restore` | the restore pass |
+| `notification` | the toast shown while restore runs, sent and taken down through Omarchy's own commands |
 | `cli` | the six commands |
 
 The unit tests need no compositor: `/proc` and `hyprctl` are read through named functions the tests substitute. The live tests drive the plugin against a real Hyprland in a container, with stand-in apps for the shapes that break restore.

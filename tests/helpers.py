@@ -5,6 +5,7 @@ those at the module that owns them (proc, hypr, config) and the code under
 test sees the fake through the module attribute. Nothing mocks Hyprland itself.
 """
 
+import contextlib
 import io
 import itertools
 import json
@@ -16,7 +17,7 @@ import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import chromium, config, hypr, proc, relaunch, restore, session
+from omarchy_last_session import chromium, config, hypr, notification, proc, relaunch, restore, session
 
 # Brave's real command line, as Chromium reports it: one argument holding the
 # whole thing, because it rewrites argv to set the process title.
@@ -226,7 +227,9 @@ class RestoreHarness(StateDirCase):
 
     def run_restore(self, clients_sequence, sweep_timeout=0):
         """Every line of Lua restore sent, dispatched or evaluated, and each
-        browser profile it marked as cleanly exited, in order.
+        browser profile it marked as cleanly exited, in order. `timeline` has
+        the toast going up and down among them, and `toast_seconds` how long
+        the toast asked to stay.
 
         The sweep polls until it runs out of time, so the clock is faked (one
         second per reading) and the last client view repeats forever. Without
@@ -237,8 +240,21 @@ class RestoreHarness(StateDirCase):
         def next_view():
             return views.pop(0) if len(views) > 1 else views[0]
 
-        sent = []
+        sent = self.timeline = []
+
+        # Stands in for the real one, which would raise a toast on the machine
+        # the suite runs on.
+        @contextlib.contextmanager
+        def toast(summary, body, glyph, seconds):
+            sent.append(f"toast up: {summary} {body}")
+            self.toast_seconds = seconds
+            try:
+                yield
+            finally:
+                sent.append(f"toast down: {summary}")
+
         with (
+            mock.patch.object(notification, "showing", toast),
             mock.patch.object(config, "SWEEP_TIMEOUT", sweep_timeout),
             mock.patch.object(config, "SPAWN_STAGGER", 0),
             mock.patch.object(time, "time", side_effect=itertools.count(1001)),
@@ -252,4 +268,4 @@ class RestoreHarness(StateDirCase):
             ),
         ):
             restore.restore_session()
-        return sent
+        return [line for line in sent if not line.startswith("toast ")]
