@@ -298,3 +298,28 @@ class ChromiumWebApps(unittest.TestCase):
         self.assertEqual(
             self.relaunch("someapp", ["/usr/bin/someapp", "--app=x"]), "/usr/bin/someapp --app=x"
         )
+
+
+class InstalledWebApps(unittest.TestCase):
+    """An app installed with the browser's Install button opens with --app-id, and its
+    window runs in the browser's process too. Saved with the browser's command line, Brave's
+    WhatsApp Web came back as a blank browser window (2026-09-25)."""
+
+    BRAVE = "/opt/brave-bin/brave"
+    WHATSAPP = "brave-hnpfjngllnobngcgfapefoaidbinmjnm-Default"
+
+    def relaunch(self, argv):
+        with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=list(argv)):
+            return relaunch.build_relaunch_command(client(self.WHATSAPP, pid=7))
+
+    def test_an_installed_web_app_is_relaunched_by_its_app_id(self):
+        self.assertEqual(
+            self.relaunch([self.BRAVE, "--restore-last-session"]),
+            f"{self.BRAVE} --restore-last-session --app-id=hnpfjngllnobngcgfapefoaidbinmjnm",
+        )
+
+    def test_an_installed_web_app_does_not_take_the_flag_of_the_app_that_started_the_browser(self):
+        self.assertEqual(
+            self.relaunch([self.BRAVE, "--app=https://web.whatsapp.com/"]),
+            f"{self.BRAVE} --app-id=hnpfjngllnobngcgfapefoaidbinmjnm",
+        )

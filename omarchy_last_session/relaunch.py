@@ -12,11 +12,15 @@ from omarchy_last_session import config, proc
 
 HOME = os.path.expanduser("~")
 APP_FLAG = "--app="
+APP_ID_FLAG = "--app-id="
 # Flags that open one window as an app rather than the browser.
-APP_FLAG_PREFIXES = (APP_FLAG, "--app-id=")
+APP_FLAG_PREFIXES = (APP_FLAG, APP_ID_FLAG)
 # The Wayland app id Chromium gives a window opened with --app=<url>: host and
 # path joined by "_", every "/" turned into "_", then the profile directory.
 WEB_APP_CLASS = re.compile(r"^(?:chrome|chromium|brave|msedge)-(?P<name>[^_/]+__.*)-(?P<profile>[^-]+)$")
+# The one it gives a window of an app installed with the Install button, opened
+# with --app-id=<id>: the app's 32-letter id, then the profile directory.
+INSTALLED_APP_CLASS = re.compile(r"^(?:chrome|chromium|brave|msedge)-(?P<app_id>[a-p]{32})-[^-]+$")
 
 
 def build_relaunch_command(client, session_file=None):
@@ -36,13 +40,22 @@ def build_relaunch_command(client, session_file=None):
 def fit_app_flags(argv, cls):
     """A Chromium browser is one process for all its windows, and its command
     line is that of the launch that started it: when that was a web app, every
-    window reports the app's --app. A browser window drops it, and a web app
+    window reports the app's flag. A browser window drops it, and a web app
     window gets its own back from its class."""
-    url = find_web_app_url(cls, argv)
-    if url is None and cls not in config.CHROMIUM_BROWSERS:
+    own = find_own_app_flag(cls, argv)
+    if own is None and cls not in config.CHROMIUM_BROWSERS:
         return argv
     kept = [arg for arg in argv if not arg.startswith(APP_FLAG_PREFIXES)]
-    return kept + [APP_FLAG + url] if url else kept
+    return kept + [own] if own else kept
+
+
+def find_own_app_flag(cls, argv):
+    """--app-id=<id> for a window of an installed app, --app=<url> for one opened by URL."""
+    installed = INSTALLED_APP_CLASS.match(cls)
+    if installed:
+        return APP_ID_FLAG + installed["app_id"]
+    url = find_web_app_url(cls, argv)
+    return APP_FLAG + url if url else None
 
 
 def find_web_app_url(cls, argv):
