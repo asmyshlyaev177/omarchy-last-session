@@ -26,6 +26,8 @@ LIVE = os.environ.get("OLS_LIVE_TESTS") == "1" and all(
     shutil.which(binary) for binary in ("Hyprland", "labwc", "foot")
 )
 MONITORS = ("MON-A", "MON-B")
+# A laptop docked to two monitors, which Hyprland gives workspaces 1, 2 and 3 in this order.
+DOCKED = ("eDP-1", "DP-9", "HDMI-A-1")
 # Kitty appends its pid, so every instance answers on its own socket.
 KITTY_SOCKET = "olskitty"
 # The real browser; bin/chromium, first on PATH, is the stand-in the other tests use.
@@ -190,6 +192,14 @@ class Compositor:
 
     def clients(self):
         return [c for c in self.json("clients") if c.get("mapped") and c.get("class")]
+
+    def shown_workspaces(self):
+        return {m["name"]: m["activeWorkspace"]["name"] for m in self.json("monitors")}
+
+    def window_places(self):
+        """Each window's workspace and monitor, by name: a named workspace's number changes."""
+        monitors = {m["id"]: m["name"] for m in self.json("monitors")}
+        return {c["class"]: (c["workspace"]["name"], monitors.get(c["monitor"])) for c in self.clients()}
 
     def window(self, client):
         return next(c for c in self.clients() if c["address"] == client["address"])
@@ -455,12 +465,25 @@ class LiveRestore(unittest.TestCase):
         with open(path, "w") as f:
             f.write("\n".join(CHROMIUM_FLAGS.split() + ["--proxy-server=127.0.0.1:9"]) + "\n")
 
-    def restore_after_reboot(self, state):
-        """Logs out once Chromium has written its session file, 2.5 s after a change,
-        then logs back in and restores from `state`."""
+    def has_chromium_saved(self, pages):
+        """Whether Chromium's newest session file holds every page's URL, which it stores as plain text."""
+        sessions = glob.glob(
+            os.path.join(self.comp.home, ".config", "chromium", "Default", "Sessions", "Session_*")
+        )
+        if not sessions:
+            return False
+        with open(max(sessions, key=os.path.getmtime), "rb") as f:
+            saved = f.read()
+        return all(page.encode() in saved for page in pages)
+
+    def restore_after_reboot(self, state, pages):
+        """Logs out once Chromium has written `pages` to its session file, then logs back
+        in and restores from `state`."""
         c = self.comp
         pids = {w["pid"] for w in c.clients()}
-        time.sleep(3)
+        # Chromium writes the file 2.5 s after a change, and later on a busy machine:
+        # a fixed 3 s wait lost both pages once in a full run of the suite.
+        wait_for(lambda: self.has_chromium_saved(pages), "Chromium to write its session file")
         c.shutdown()
         wait_for(lambda: not any(is_running(pid) for pid in pids), "every app to exit with its compositor")
         c.boot(MONITORS)
@@ -659,11 +682,12 @@ class LiveRestore(unittest.TestCase):
             )
             self.assertEqual(launches, [("chrome-web.whatsapp.com__-Default", True), ("chromium", False)])
 
-        self.restore_after_reboot("state")
+        pages = ("dashboard.html", "article.html")
+        self.restore_after_reboot("state", pages)
         first = self.snapshot("save", "state-1")
         self.assertEqual(windows_by_page(first), windows_by_page(saved), c.requests())
 
-        self.restore_after_reboot("state-1")
+        self.restore_after_reboot("state-1", pages)
         second = self.snapshot("save", "state-2")
         self.assertEqual(windows_by_page(second), windows_by_page(saved), c.requests())
 
@@ -827,6 +851,43 @@ class LiveRestore(unittest.TestCase):
                 self.assertEqual(c["monitor"], only["id"], self.comp.requests())
                 self.assertGreaterEqual(c["at"][0], only["x"], self.comp.requests())
                 self.assertLess(c["at"][0], only["x"] + only["width"], self.comp.requests())
+
+    def test_every_monitor_shows_its_workspace_and_every_workspace_is_on_its_monitor(self):
+        """A workspace moved onto a monitor is not the one it shows. The windows of DP-9 and
+        HDMI-A-1 came back onto workspaces moved there, behind empty ones (2026-09-25).
+        Workspace 4 and the named Home are out of sight behind the ones each monitor shows."""
+        c = self.comp
+        c.boot(DOCKED)
+        for number in (1, 2, 3):
+            c.dispatch(f"hl.dsp.focus({{ workspace = {number} }})")
+            c.open_window(f"foot --app-id=shown{number}")
+        # The workspace is made on the monitor focused when the window maps.
+        for shown, cls, hidden in ((2, "behind", "4"), (3, "named", "name:Home")):
+            c.dispatch(f"hl.dsp.focus({{ workspace = {shown} }})")
+            c.dispatch(f"hl.dsp.exec_cmd([[foot --app-id={cls}]], {{ workspace = '{hidden} silent' }})")
+            wait_for(lambda cls=cls: cls in c.window_places(), f"{cls} to map")
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        before = (c.shown_workspaces(), c.window_places())
+        self.assertEqual(
+            before,
+            (
+                {"eDP-1": "1", "DP-9": "2", "HDMI-A-1": "3"},
+                {
+                    "shown1": ("1", "eDP-1"),
+                    "shown2": ("2", "DP-9"),
+                    "shown3": ("3", "HDMI-A-1"),
+                    "behind": ("4", "DP-9"),
+                    "named": ("Home", "HDMI-A-1"),
+                },
+            ),
+        )
+        self.snapshot("shutdown", "state")
+
+        c.shutdown()
+        c.boot(DOCKED)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        self.assertEqual((c.shown_workspaces(), c.window_places()), before, c.requests())
 
     def test_a_renamed_workspace_comes_back_under_its_number(self):
         """A numbered workspace the user renamed keeps its number: the bar
