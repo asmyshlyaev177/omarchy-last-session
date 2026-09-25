@@ -12,10 +12,11 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import config, hypr, proc, relaunch, session
+from omarchy_last_session import chromium, config, hypr, proc, relaunch, restore, session
 
 # Brave's real command line, as Chromium reports it: one argument holding the
 # whole thing, because it rewrites argv to set the process title.
@@ -203,3 +204,52 @@ class StateDirCase(unittest.TestCase):
             mock.patch.object(proc, "read_cmdline", return_value=list(cmdline)),
         ):
             return session.save_session()
+
+
+class RestoreHarness(StateDirCase):
+    """restore reaches the compositor through hypr.dispatch, hypr.eval_lua and
+    hypr.get_managed_clients, so the whole pass is observable. The first two
+    both send Lua and are recorded in one list, so their order is too."""
+
+    def setUp(self):
+        super().setUp()
+        self.patch(time, "sleep", mock.Mock())
+        # restore reports what it did on stdout and what it could not do on
+        # stderr; a test that cares captures them itself, the rest keep both
+        # out of the run
+        self.patch(sys, "stdout", io.StringIO())
+        self.patch(sys, "stderr", io.StringIO())
+        # one monitor by default: the placement pass stays a no-op
+        self.patch(hypr, "query", mock.Mock(return_value=[]))
+        # never touch a real browser profile
+        self.patch(chromium, "mark_clean_exit", mock.Mock(return_value=0))
+
+    def run_restore(self, clients_sequence, sweep_timeout=0):
+        """Every line of Lua restore sent, dispatched or evaluated, and each
+        browser profile it marked as cleanly exited, in order.
+
+        The sweep polls until it runs out of time, so the clock is faked (one
+        second per reading) and the last client view repeats forever. Without
+        both, a window that never turns up hangs or exhausts the mock.
+        """
+        views = list(clients_sequence)
+
+        def next_view():
+            return views.pop(0) if len(views) > 1 else views[0]
+
+        sent = []
+        with (
+            mock.patch.object(config, "SWEEP_TIMEOUT", sweep_timeout),
+            mock.patch.object(config, "SPAWN_STAGGER", 0),
+            mock.patch.object(time, "time", side_effect=itertools.count(1001)),
+            mock.patch.object(hypr, "get_managed_clients", side_effect=next_view),
+            mock.patch.object(hypr, "dispatch", side_effect=sent.append),
+            mock.patch.object(hypr, "eval_lua", side_effect=sent.append),
+            mock.patch.object(
+                chromium,
+                "mark_clean_exit",
+                side_effect=lambda cls, cmd: sent.append(f"mark_clean_exit {cls} {cmd}"),
+            ),
+        ):
+            restore.restore_session()
+        return sent
