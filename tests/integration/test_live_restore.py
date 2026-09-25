@@ -325,6 +325,11 @@ def browser_windows(session):
     }
 
 
+def windows_by_page(session):
+    """Every window's app and workspace, by the page it shows."""
+    return sorted((w["title"], app_name(w["class"]), w["workspace"]["id"]) for w in session["windows"])
+
+
 def is_running(pid):
     """A zombie has exited, whatever /proc still shows for it."""
     try:
@@ -435,6 +440,32 @@ class LiveRestore(unittest.TestCase):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write("allow_remote_control socket-only\nlisten_on unix:@{}\n".format(KITTY_SOCKET))
+
+    def write_browser_pages(self):
+        for name, html in BROWSER_PAGES.items():
+            with open(os.path.join(self.comp.home, name), "w", encoding="utf-8") as f:
+                f.write(f'<meta charset="utf-8">{html}\n')
+
+    def write_chromium_flags(self):
+        """Omarchy gives the browser its flags in ~/.config/<browser>-flags.conf, which Arch's
+        launcher puts on the command line restore saves. The proxy, where nothing listens,
+        keeps a web app off the network and titled with its host, as the real WhatsApp is."""
+        path = os.path.join(self.comp.home, ".config", "chromium-flags.conf")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("\n".join(CHROMIUM_FLAGS.split() + ["--proxy-server=127.0.0.1:9"]) + "\n")
+
+    def restore_after_reboot(self, state):
+        """Logs out once Chromium has written its session file, 2.5 s after a change,
+        then logs back in and restores from `state`."""
+        c = self.comp
+        pids = {w["pid"] for w in c.clients()}
+        time.sleep(3)
+        c.shutdown()
+        wait_for(lambda: not any(is_running(pid) for pid in pids), "every app to exit with its compositor")
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, state))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
 
     def snapshot(self, action, name):
         state = os.path.join(self.work, name)
@@ -567,9 +598,7 @@ class LiveRestore(unittest.TestCase):
         titles arrive after the page, as the real sites' do."""
         c = self.comp
         c.boot(MONITORS)
-        for name, html in BROWSER_PAGES.items():
-            with open(os.path.join(c.home, name), "w", encoding="utf-8") as f:
-                f.write(f'<meta charset="utf-8">{html}\n')
+        self.write_browser_pages()
 
         def open_page(name):
             return c.open_window(f"{CHROMIUM} {CHROMIUM_FLAGS} --new-window file://{c.home}/{name}")
@@ -604,6 +633,39 @@ class LiveRestore(unittest.TestCase):
         self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
         after = self.snapshot("save", "state-after")
         self.assertEqual(browser_windows(after), before, restored.stdout)
+
+    def test_a_web_app_and_its_browser_come_back_as_themselves(self):
+        """A web app is a window of its browser's process, and /proc shows the command line
+        of whichever launch started that process. WhatsApp started Chrome, so every Chrome
+        window was saved as WhatsApp and restore brought back WhatsApp alone (2026-09-25).
+        The second login is the usual one: restore starts the browser and the web app joins it."""
+        c = self.comp
+        c.boot(MONITORS)
+        self.write_browser_pages()
+        self.write_chromium_flags()
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        whatsapp = c.open_window("omarchy-launch-webapp https://web.whatsapp.com/")
+        dashboard = c.open_window(f"{CHROMIUM} --new-window file://{c.home}/dashboard.html")
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        news = c.open_window(f"{CHROMIUM} --new-window file://{c.home}/article.html")
+        wait_for(lambda: c.window(whatsapp)["title"] == "web.whatsapp.com", "the web app's page")
+        wait_for(lambda: c.window(dashboard)["title"].startswith("JobBot"), "the dashboard")
+        wait_for(lambda: c.window(news)["title"].startswith("Brent oil"), "the news page")
+
+        saved = self.snapshot("save", "state")
+        with self.subTest("one launch reopens the browser and one the web app"):
+            launches = sorted(
+                (app_name(w["class"]), "--app=" in w["cmd"]) for w in saved["windows"] if w["spawn"]
+            )
+            self.assertEqual(launches, [("chrome-web.whatsapp.com__-Default", True), ("chromium", False)])
+
+        self.restore_after_reboot("state")
+        first = self.snapshot("save", "state-1")
+        self.assertEqual(windows_by_page(first), windows_by_page(saved), c.requests())
+
+        self.restore_after_reboot("state-1")
+        second = self.snapshot("save", "state-2")
+        self.assertEqual(windows_by_page(second), windows_by_page(saved), c.requests())
 
     def test_an_editor_is_launched_once_for_all_of_its_windows(self):
         """One process serves every window of the editor and it reopens them

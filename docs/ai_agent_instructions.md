@@ -77,7 +77,7 @@ Comments explain what a name cannot. No comment restates the line under it, no d
 - The daemon's event stream is tested against a real `socket.socketpair()`, which pins which events wake it and which are ignored.
 - A bug fix comes with a test named after the behaviour it pins.
 - The live suite's `run_script` writes the config file only when given a state dir; `test_the_config_file_is_written_on_first_run_and_an_edit_is_honoured` runs without one, so the launcher writes the template into the fake home and the test edits it as a user would.
-- `tests/integration/bin` holds the stand-in apps: a browser, an editor, Steam and an office suite. Each reproduces one shape restore has to handle, taken from what the real app does on this desktop.
+- `tests/integration/bin` holds the stand-in apps: a browser, an editor, Steam, an office suite and Omarchy's web app launcher. Each reproduces one shape restore has to handle, taken from what the real app does on this desktop.
 - Every session file `test_kitty.py` expects was replayed into a real kitty and the instance it built compared with the one it came from, so those shapes are what kitty does. Re-check against a real kitty before changing one.
 
 ## Trying a change on this desktop

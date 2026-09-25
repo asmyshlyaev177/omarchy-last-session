@@ -1,0 +1,5 @@
+#!/bin/bash
+# Stand-in for Omarchy's web app launcher (/usr/bin/omarchy-launch-webapp), which
+# runs the default browser with --app. The browser here is Chromium, and uwsm-app
+# is left out: it only puts the app in a systemd scope, which restore never sees.
+exec setsid /usr/bin/chromium --app="$1" "${@:2}"
