@@ -79,8 +79,9 @@ SETTINGS = {
     ),
     "title_settle": (
         5,
-        "Seconds a browser window still loading may take to show its title, which says\n"
-        "which saved window it is.",
+        "Seconds restore waits for an app's windows to turn up and for their titles to stop\n"
+        "changing, since a browser titles a window before its page has loaded and the\n"
+        "titles are what tell its windows apart.",
     ),
     "max_preexisting_windows": (
         3,

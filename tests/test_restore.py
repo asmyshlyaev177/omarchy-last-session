@@ -4,6 +4,8 @@ rebuilding, monitor placement, and the Lua the compositor receives."""
 import io
 import itertools
 import os
+import random
+import re
 import shlex
 import sys
 import time
@@ -295,17 +297,151 @@ class SweepWaitsForTitles(RestoreHarness):
         self.assertEqual(len(moves), 1)
         self.assertIn("workspace = '1'", moves[0])
 
-    def test_a_window_that_stays_blank_is_paired_after_the_wait(self):
+    def test_a_window_that_stays_blank_is_paired_all_the_same(self):
         self.write_session([dict(saved_window("brave-browser", ws=3), title="about:blank - Brave")])
         emitted = self.run_restore([{}, {"0xb": self.brave("about:blank - Brave")}], sweep_timeout=10)
         self.assertTrue(any("window.move" in e and "0xb" in e and "workspace = '3'" in e for e in emitted))
 
     def test_the_wait_ends_with_the_sweep(self):
-        """A window still loading when time runs out is placed by what it has."""
+        """A window still loading when time runs out is placed by what it has.
+        The second entry gives it something to be told apart from, or it
+        would not wait at all."""
         self.patch(config, "TITLE_SETTLE", 100)
-        self.write_session([dict(saved_window("brave-browser", ws=3), title="Trade - Brave")])
+        self.write_session(
+            [
+                dict(saved_window("brave-browser", ws=3), title="Trade - Brave"),
+                dict(saved_window("brave-browser", ws=4, spawn=False), title="Home / X - Brave"),
+            ]
+        )
         emitted = self.run_restore([{}, {"0xb": self.brave("Untitled - Brave")}], sweep_timeout=5)
         self.assertTrue(any("window.move" in e and "0xb" in e for e in emitted))
+
+
+def brave_window(title, ws):
+    """A Brave window as the sweep sees it, titled the way Brave titles one."""
+    return {
+        "class": "brave-browser",
+        "workspace": {"id": ws},
+        "title": f"{title} - Brave",
+        "at": [0, 0],
+        "floating": False,
+    }
+
+
+def saved_brave(title, ws, spawn=False):
+    return dict(saved_window("brave-browser", ws=ws, spawn=spawn), title=f"{title} - Brave")
+
+
+def get_moves(emitted):
+    """Address -> the workspace the sweep moved that window to."""
+    found = (
+        re.search(r"workspace = '([^']+)', follow = false, window = 'address:(\w+)'", e) for e in emitted
+    )
+    return {m[2]: m[1] for m in found if m}
+
+
+class RivalBrowserWindows(RestoreHarness):
+    """Brave reopens the windows of its own session all at once and in no set
+    order, each titled with whatever its page shows so far. Paired one at a
+    time in the order Hyprland listed them, and by letters rather than words, a
+    window whose page had changed since the save took the entry of one still
+    showing its saved title, and the two came back on each other's monitors:
+    four boots in twelve, September 2026."""
+
+    BYBIT = "▲ 86236.8 | Trade BTCUSDT | Bybit Perpetual Contracts"
+    CHANGED = "Трудно быть богом (1 сезон) смотреть онлайн бесплатно"
+
+    def test_a_window_showing_its_saved_title_keeps_its_entry(self):
+        """The boot of 2026-09-23, in every order Hyprland could list the windows."""
+        saved = [
+            saved_brave(self.BYBIT, 1, spawn=True),
+            saved_brave("JobBot Dashboard", 3),
+            saved_brave("Home / X", 2),
+        ]
+        landed = [
+            ("0xt", brave_window(self.CHANGED, 1)),
+            ("0xb", brave_window("Bybit", 1)),
+            ("0xj", brave_window("JobBot Dashboard", 1)),
+        ]
+        for order in itertools.permutations(landed):
+            with self.subTest(order=[address for address, _ in order]):
+                self.write_session(saved)
+                emitted = self.run_restore([{}, dict(order)], sweep_timeout=5)
+                self.assertEqual(get_moves(emitted), {"0xt": "2", "0xj": "3"})
+
+    def test_a_window_showing_its_site_name_finds_its_page(self):
+        """The boot of 2026-09-18: Bybit titles its page 'Bybit' until the prices load."""
+        self.write_session(
+            [
+                saved_brave("▼ 81236.1 | Trade BTCUSDT | Bybit Perpetual Contracts", 1, spawn=True),
+                saved_brave("Home / X", 2),
+            ]
+        )
+        landed = {
+            "0xo": brave_window("Brent oil - Price - Chart - Historical Data - News", 1),
+            "0xb": brave_window("Bybit", 1),
+        }
+        self.assertEqual(get_moves(self.run_restore([{}, landed], sweep_timeout=5)), {"0xo": "2"})
+
+    def test_windows_are_told_apart_by_the_titles_their_pages_settle_on(self):
+        """Both first show only the site's name, which fits either entry."""
+        rust, python = "Rust (programming language) - Wikipedia", "Python (programming language) - Wikipedia"
+        self.write_session([saved_brave(rust, 1, spawn=True), saved_brave(python, 2)])
+        loading = {"0xa": brave_window("Wikipedia", 1), "0xb": brave_window("Wikipedia", 1)}
+        loaded = {"0xa": brave_window(python, 1), "0xb": brave_window(rust, 1)}
+        self.assertEqual(get_moves(self.run_restore([{}, loading, loaded], sweep_timeout=8)), {"0xa": "2"})
+
+    def test_a_window_that_turns_up_later_is_not_robbed_of_its_entry(self):
+        """The first window's page changed since the save, so only elimination
+        can place it, and that has to wait for its rival to turn up."""
+        self.write_session([saved_brave(self.BYBIT, 1, spawn=True), saved_brave("Home / X", 2)])
+        alone = {"0xt": brave_window(self.CHANGED, 1)}
+        both = dict(alone, **{"0xb": brave_window("Bybit", 1)})
+        emitted = self.run_restore([{}, alone, alone, both], sweep_timeout=10)
+        self.assertEqual(get_moves(emitted), {"0xt": "2"})
+
+    def test_a_window_that_never_turns_up_holds_the_rest_only_briefly(self):
+        self.patch(config, "TITLE_SETTLE", 3)
+        self.write_session(
+            [
+                saved_brave(self.BYBIT, 1, spawn=True),
+                saved_brave("JobBot Dashboard", 3),
+                saved_brave("Home / X", 2),
+            ]
+        )
+        landed = {"0xj": brave_window("JobBot Dashboard", 1), "0xx": brave_window("Home / X", 1)}
+        # Gone after the fourth pass: only a wait that ends TITLE_SETTLE after
+        # they turned up, not at the end of the sweep, places them.
+        with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+            emitted = self.run_restore([{}] + [landed] * 4 + [{}], sweep_timeout=15)
+        self.assertEqual(get_moves(emitted), {"0xj": "3", "0xx": "2"})
+        self.assertIn(
+            f"no window turned up for brave-browser '{self.BYBIT} - Brave' from workspace 1", err.getvalue()
+        )
+
+    def test_a_title_that_keeps_changing_is_paired_when_the_wait_runs_out(self):
+        """Gmail swaps its title back and forth while a message is new."""
+        self.patch(config, "TITLE_SETTLE", 3)
+        self.write_session([saved_brave("Inbox - Gmail", 1, spawn=True), saved_brave("YouTube", 2)])
+        inbox = {"0xg": brave_window("Inbox - Gmail", 1), "0xy": brave_window("YouTube", 1)}
+        news = {"0xg": brave_window("New message from Ann - Gmail", 1), "0xy": brave_window("YouTube", 1)}
+        emitted = self.run_restore([{}] + [inbox, news] * 3 + [{}], sweep_timeout=20)
+        self.assertEqual(get_moves(emitted), {"0xy": "2"})
+
+    def test_a_lone_window_is_paired_at_once_whatever_its_title(self):
+        """With one entry to take there is nothing to tell apart."""
+        self.write_session([saved_brave("Home / X", 2, spawn=True)])
+        blank = {"0xb": brave_window("New Tab", 1)}
+        # Gone by the second pass, so only a pairing in the first one places it.
+        emitted = self.run_restore([{}, blank, {}], sweep_timeout=10)
+        self.assertEqual(get_moves(emitted), {"0xb": "2"})
+
+    def test_a_spare_window_does_not_take_the_entry_of_one_that_fits_it(self):
+        """More windows than entries: listed first and on the entry's own
+        workspace, the spare used to be given it."""
+        self.write_session([saved_brave("Home / X", 2, spawn=True)])
+        landed = {"0xs": brave_window("Welcome to Brave", 2), "0xx": brave_window("Home / X", 1)}
+        self.assertEqual(get_moves(self.run_restore([{}, landed], sweep_timeout=5)), {"0xx": "2"})
 
 
 class RestoreKeepsACopy(RestoreHarness):
@@ -340,10 +476,82 @@ class PairingIsLogged(RestoreHarness):
         ):
             self.run_restore([{}, landed], sweep_timeout=5)
         line = next(line for line in out.getvalue().splitlines() if "is the saved" in line)
-        self.assertIn("brave-browser 'Trade - Brave' on workspace 1", line)
+        self.assertIn("brave-browser 0xaa 'Trade - Brave' on workspace 1", line)
         self.assertIn("from workspace 4", line)
         self.assertIn("placing it", line)
         self.assertEqual(err.getvalue(), "")
+
+    def restore_logging(self, views, sweep_timeout):
+        with (
+            mock.patch.object(sys, "stdout", io.StringIO()) as out,
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            self.run_restore(views, sweep_timeout=sweep_timeout)
+        return out.getvalue(), err.getvalue()
+
+    def test_each_launch_is_logged(self):
+        self.write_session([saved_window("code", ws=3)])
+        out, _ = self.restore_logging([{}], sweep_timeout=0)
+        self.assertIn("launched code onto workspace 3", out)
+
+    def test_every_title_a_window_shows_until_it_is_paired_is_logged(self):
+        """In order, with the address that ties the lines of one window together."""
+        full = "▲ 84388.9 | Trade BTCUSDT | Bybit Perpetual Contracts"
+        self.write_session([saved_brave(full, 1, spawn=True), saved_brave("Home / X", 2)])
+        views = [{}] + [
+            {"0xb": brave_window(title, 1), "0xx": brave_window("Home / X", 1)}
+            for title in ("New Tab", "Bybit", full)
+        ]
+        out, err = self.restore_logging(views, sweep_timeout=10)
+        about_b = [line.split(": ", 1)[1] for line in out.splitlines() if " 0xb " in line]
+        self.assertEqual(
+            about_b[:3],
+            [
+                "brave-browser 0xb turned up on workspace 1 titled 'New Tab - Brave'",
+                "brave-browser 0xb is now titled 'Bybit - Brave'",
+                f"brave-browser 0xb is now titled '{full} - Brave'",
+            ],
+        )
+        self.assertIn("is the saved", about_b[3])
+        self.assertEqual(err, "")
+
+    def test_a_window_restore_has_no_entry_for_is_not_logged(self):
+        self.write_session([saved_brave("Home / X", 2, spawn=True)])
+        mines = {"class": "org.gnome.Mines", "workspace": {"id": 1}, "title": "Mines"}
+        out, _ = self.restore_logging(
+            [{}, {"0xx": brave_window("Home / X", 1), "0xm": mines}], sweep_timeout=3
+        )
+        self.assertNotIn("0xm", out)
+
+    def test_a_wait_that_runs_out_is_logged(self):
+        """Pairing on titles that may still be loading is worth knowing about."""
+        self.patch(config, "TITLE_SETTLE", 2)
+        self.write_session([saved_brave("Home / X", 2, spawn=True), saved_brave("JobBot Dashboard", 3)])
+        out, err = self.restore_logging([{}, {"0xx": brave_window("Home / X", 1)}], sweep_timeout=6)
+        self.assertIn("waited 2 s for brave-browser windows: 1 of 2 turned up, 0 still changing titles", out)
+        self.assertIn(
+            "no window turned up for brave-browser 'JobBot Dashboard - Brave' from workspace 3", err
+        )
+
+    def test_a_missing_window_says_whether_its_app_reopened_the_others(self):
+        """Brave reopened two of three windows after a logout, 2026-09-25: its own
+        session had recorded the third as closed. An app with no window at all
+        never started, which is another fault, so its line stays plain."""
+        self.write_session(
+            [
+                saved_brave("Home / X", 2, spawn=True),
+                saved_brave("JobBot Dashboard", 3),
+                saved_window("code", ws=5),
+            ]
+        )
+        _, err = self.restore_logging([{}, {"0xx": brave_window("Home / X", 2)}], sweep_timeout=8)
+        lines = [line.split(": ", 1)[1] for line in err.splitlines()]
+        self.assertIn(
+            "no window turned up for brave-browser 'JobBot Dashboard - Brave' from workspace 3;"
+            " brave-browser reopened 1 of its 2 windows",
+            lines,
+        )
+        self.assertIn("no window turned up for code '' from workspace 5", lines)
 
 
 class ExcludedAtRestore(RestoreHarness):
@@ -358,6 +566,12 @@ class ExcludedAtRestore(RestoreHarness):
         self.assertIn("code", launched[0])
 
 
+def match_one(pending, client):
+    """The entry the sweep gives a window that turned up on its own, or None."""
+    pairs = restore.pair_arrivals(pending, {"0xa": client})
+    return pairs[0][0] if pairs else None
+
+
 class PairAcrossAClassShift(unittest.TestCase):
     """Chromium reports chromium-browser when restore relaunches it from a
     command line rather than from its desktop entry. The window has to be
@@ -370,7 +584,7 @@ class PairAcrossAClassShift(unittest.TestCase):
 
     def pair(self, saved, client, argv):
         with mock.patch.object(proc, "read_cmdline", return_value=argv):
-            return restore.match_saved_entry(saved, client)
+            return match_one(saved, client)
 
     def test_the_program_matches_when_the_class_does_not(self):
         saved = [saved_window("chromium", ws=2, cmd=self.CHROMIUM)]
@@ -438,30 +652,30 @@ class PairAmongWindowsOfOneClass(unittest.TestCase):
         """The window opened on workspace 2, where the other one belongs."""
         bybit, kobeissi = self.brave(1, self.BYBIT), self.brave(2, self.KOBEISSI)
         landed = self.client("▲ 78033.3 | Trade BTCUSDT | Bybit Perpetual", ws=2)
-        self.assertIs(restore.match_saved_entry([bybit, kobeissi], landed), bybit)
+        self.assertIs(match_one([bybit, kobeissi], landed), bybit)
 
     def test_each_window_takes_its_own_place(self):
         bybit, kobeissi = self.brave(1, self.BYBIT), self.brave(2, self.KOBEISSI)
         pending = [bybit, kobeissi]
-        first = restore.match_saved_entry(pending, self.client(self.KOBEISSI, ws=1))
+        first = match_one(pending, self.client(self.KOBEISSI, ws=1))
         pending.remove(first)
         self.assertIs(first, kobeissi)
-        self.assertIs(restore.match_saved_entry(pending, self.client(self.BYBIT, ws=1)), bybit)
+        self.assertIs(match_one(pending, self.client(self.BYBIT, ws=1)), bybit)
 
     def test_the_workspace_decides_when_there_are_no_titles(self):
         away, here = self.brave(9, ""), self.brave(2, "")
-        self.assertIs(restore.match_saved_entry([away, here], self.client("", ws=2)), here)
+        self.assertIs(match_one([away, here], self.client("", ws=2)), here)
 
     def test_matching_titles_fall_back_to_the_workspace(self):
         away, here = self.brave(9, "fish"), self.brave(2, "fish")
-        self.assertIs(restore.match_saved_entry([away, here], self.client("fish", ws=2)), here)
+        self.assertIs(match_one([away, here], self.client("fish", ws=2)), here)
 
     def test_a_title_the_window_no_longer_has_still_beats_a_stranger(self):
         """VS Code drops the project name when it reopens on its welcome tab."""
         study = dict(saved_window("code", ws=1), title="STUDY-PLAN.md - projects")
         other = dict(saved_window("code", ws=2), title="omarchy-last-session - Code")
         landed = self.client("STUDY-PLAN.md - projects (Workspace)", ws=2, cls="code")
-        self.assertIs(restore.match_saved_entry([study, other], landed), study)
+        self.assertIs(match_one([study, other], landed), study)
 
 
 class TitleLikeness(unittest.TestCase):
@@ -487,18 +701,93 @@ class TitleLikeness(unittest.TestCase):
         self.assertLess(restore.score_title_likeness("Home / X - Brave", "Example Domain - Brave"), 0.3)
 
     def test_a_drifted_page_title_still_matches(self):
+        """Only the price moved: six of its seven words are still there."""
         drifted = "▼ 80697.5 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
-        self.assertGreater(restore.score_title_likeness(self.BYBIT, drifted), 0.9)
+        self.assertGreater(restore.score_title_likeness(self.BYBIT, drifted), 0.8)
+
+    def test_unrelated_pages_share_nothing(self):
+        """Compared letter by letter these scored 0.22, above the 0.17 of the
+        Bybit window's own early title, and the two windows swapped monitors
+        (2026-09-20). Long titles share letters by chance, not words."""
+        saved = "▲ 81099.6 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
+        for live in (
+            "Junior Software Engineers | Hyphen | LinkedIn - Brave",
+            "Brent oil - Price - Chart - Historical Data - News - Brave",
+        ):
+            with self.subTest(live=live):
+                self.assertEqual(restore.score_title_likeness(saved, live), 0.0)
+
+    def test_a_site_name_matches_the_full_title_it_is_part_of(self):
+        """What these sites title a page until it has loaded, seen at restore."""
+        for saved, live in (
+            ("▲ 81099.6 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave", "Bybit - Brave"),
+            ("Inbox - someone@gmail.com - Gmail - Brave", "Gmail - Brave"),
+            ('Wesker on X: "Something new" / X - Brave', "X - Brave"),
+        ):
+            with self.subTest(live=live):
+                self.assertGreater(restore.score_title_likeness(saved, live), 0.0)
+
+    def test_an_address_shown_while_loading_matches_its_page(self):
+        """Its words come in another order than the page title's."""
+        loading = "www.bybit.com/trade/usdt/BTCUSDT - Brave"
+        self.assertGreater(restore.score_title_likeness(self.BYBIT, loading), 0.0)
+        self.assertEqual(restore.score_title_likeness("Home / X - Brave", loading), 0.0)
+
+    def test_a_number_still_tells_two_titles_apart(self):
+        """The live suite's browser reopens 'tab 1' as 'tab 1 - reopened'."""
+        live = "tab 1 - reopened"
+        self.assertGreater(
+            restore.score_title_likeness("tab 1", live), restore.score_title_likeness("tab 2", live)
+        )
+
+    def test_case_does_not_count(self):
+        self.assertEqual(restore.score_title_likeness("GMAIL - Brave", "Gmail - Brave"), 1.0)
 
     def test_titles_without_an_app_name_compare_whole(self):
         self.assertEqual(restore.score_title_likeness("alex@host:~", "alex@host:~"), 1.0)
         self.assertEqual(restore.score_title_likeness("", "anything"), 0.0)
+
+    def test_titles_with_no_words_compare_whole(self):
+        self.assertEqual(restore.score_title_likeness("🎵 - Brave", "🎵 - Brave"), 1.0)
+        self.assertEqual(restore.score_title_likeness("🎵 - Brave", "⚡ - Brave"), 0.0)
 
     def test_a_loading_title_is_recognised(self):
         for title in ("Untitled - Brave", "New Tab - Brave", "about:blank - Brave"):
             self.assertTrue(restore.is_still_loading(title), title)
         for title in ("Trade - Brave", "alex@host:~", "", "Mines"):
             self.assertFalse(restore.is_still_loading(title), title)
+
+
+class TitleSettling(unittest.TestCase):
+    """A browser titles a window before its page has loaded: blank, then the
+    address or the site's name, then the page's own title. Rival windows are
+    told apart once their titles stop changing, and a price or an unread count
+    in a title never stops."""
+
+    FULL = "▲ 84388.9 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"
+
+    def test_an_unchanged_title_has_settled(self):
+        for title in (self.FULL, "Mines", ""):
+            with self.subTest(title=title):
+                self.assertTrue(restore.has_title_settled(title, title))
+
+    def test_a_moving_number_leaves_a_title_settled(self):
+        for before, after in (
+            (self.FULL, "▼ 84390.1 | Trade BTCUSDT | Bybit Perpetual Contracts - Brave"),
+            ("(3) Inbox - Gmail - Brave", "(4) Inbox - Gmail - Brave"),
+        ):
+            with self.subTest(after=after):
+                self.assertTrue(restore.has_title_settled(before, after))
+
+    def test_a_page_replacing_its_early_title_has_not_settled(self):
+        for early in ("Bybit - Brave", "www.bybit.com/trade/usdt/BTCUSDT - Brave"):
+            with self.subTest(early=early):
+                self.assertFalse(restore.has_title_settled(early, self.FULL))
+
+    def test_a_placeholder_never_settles(self):
+        for title in ("New Tab - Brave", "Untitled - Brave", "about:blank - Brave"):
+            with self.subTest(title=title):
+                self.assertFalse(restore.has_title_settled(title, title))
 
 
 class CommandMatch(unittest.TestCase):
@@ -547,7 +836,7 @@ class PairAcrossProcesses(unittest.TestCase):
     def pair(self, title, ws, argv):
         client = {"class": "brave-browser", "workspace": {"id": ws}, "pid": 7, "title": title, "at": [0, 0]}
         with mock.patch.object(proc, "read_cmdline", return_value=argv):
-            return restore.match_saved_entry([self.bybit, self.blank], client)
+            return match_one([self.bybit, self.blank], client)
 
     def test_a_loading_window_is_not_given_to_the_other_process(self):
         self.assertIs(self.pair("Untitled - Brave", 3, shlex.split(self.DEFAULT)), self.bybit)
@@ -559,6 +848,57 @@ class PairAcrossProcesses(unittest.TestCase):
         """Chromium reports its argv as one string."""
         with pretend_runnable():
             self.assertIs(self.pair("Untitled - Brave", 3, [self.DEFAULT]), self.bybit)
+
+
+class PairingIsStable(unittest.TestCase):
+    """Whatever the titles and workspaces, the windows paired in one pass leave
+    no window and saved entry apart that each fit the other better than what
+    they were given. Paired one at a time, the first window listed took the
+    entry that a later one fitted exactly."""
+
+    WORDS = ("bybit", "trade", "home", "x", "gmail", "inbox", "wikipedia", "rust", "1", "2")
+    UNPAIRED = (-1,)  # below every score_fit
+
+    def setUp(self):
+        patcher = mock.patch.object(proc, "read_cmdline", return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def title(self, rng):
+        return " ".join(rng.sample(self.WORDS, rng.randint(0, 3))) + " - Brave"
+
+    def test_no_window_and_entry_would_rather_have_each_other(self):
+        rng = random.Random(20260925)
+        for case in range(500):
+            pending = [
+                dict(saved_window("brave-browser", ws=rng.randint(1, 3)), title=self.title(rng))
+                for _ in range(rng.randint(0, 5))
+            ]
+            arrivals = {
+                f"0x{i}": {
+                    "class": "brave-browser",
+                    "workspace": {"id": rng.randint(1, 3)},
+                    "title": self.title(rng),
+                }
+                for i in range(rng.randint(0, 5))
+            }
+            with self.subTest(case=case):
+                self.assert_stable(pending, arrivals, restore.pair_arrivals(pending, arrivals))
+
+    def assert_stable(self, pending, arrivals, pairs):
+        entry_of = {address: entry for entry, address in pairs}
+        window_of = {id(entry): address for entry, address in pairs}
+        self.assertEqual(len(pairs), min(len(pending), len(arrivals)))
+        self.assertEqual((len(entry_of), len(window_of)), (len(pairs), len(pairs)))
+
+        def fit(entry, address):
+            return restore.score_fit(entry, arrivals[address], [])
+
+        for address, entry in itertools.product(arrivals, pending):
+            mine = fit(entry_of[address], address) if address in entry_of else self.UNPAIRED
+            theirs = fit(entry, window_of[id(entry)]) if id(entry) in window_of else self.UNPAIRED
+            together = fit(entry, address)
+            self.assertFalse(together > mine and together > theirs, (address, entry["title"], pairs))
 
 
 class PlaceWindow(unittest.TestCase):

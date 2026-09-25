@@ -49,7 +49,7 @@ Its own state directory, `~/.local/state/omarchy-last-session`, its config file,
 
 ## Let apps save before the power goes
 
-Omarchy closes every window about two seconds before it powers off. Most apps hold the shutdown themselves for as long as they need; VS Code remembers only the last window closed, so it has to be told to quit first. Add this to `~/.config/omarchy/extensions/omarchy-menu.jsonc`, creating the file if it does not exist:
+Omarchy closes every window, one at a time, about two seconds before it powers off. Most apps hold the shutdown themselves for as long as they need. A Chromium-based browser forgets each window that closes while another of its windows is still open, and VS Code remembers only the last window closed. Both keep every window when they are told to quit first, which is what these rows do. Add this to `~/.config/omarchy/extensions/omarchy-menu.jsonc`, creating the file if it does not exist:
 
 ```jsonc
 {
@@ -114,7 +114,7 @@ The config file is `~/.config/omarchy/last-session.ini`. The plugin writes it th
 | `settle_delay` | seconds vanished windows stay unsaved | `10` |
 | `save_interval` | seconds between saves when no window has opened, closed or moved | `60` |
 | `sweep_timeout` | seconds restore waits for the windows it launched | `30` |
-| `title_settle` | seconds a browser window still loading may take to show its title | `5` |
+| `title_settle` | seconds restore waits for an app's windows to turn up and for their titles to stop changing, which is what tells a browser's windows apart | `5` |
 | `max_preexisting_windows` | windows that may already be open before restore refuses to run | `3` |
 
 Two tables, one row per window class:
@@ -163,10 +163,11 @@ journalctl --user -t omarchy-shell -b | grep omarchy-last-session
 
 | Question | Where to look |
 | --- | --- |
-| What did restore bring back, and where did it put things? | `last-restore.json`, plus one log line per pairing |
+| What did restore bring back, and where did it put things? | `last-restore.json`, plus the log: each launch, every title a window showed until it was paired, and each pairing with its scores |
 | What did the last shutdown save? | `last-shutdown.json`, written by `shutdown` only |
 | Nothing came back | `session.json`. An empty window list means the desktop was empty for ten seconds before shutdown |
 | A window did not come back | the log names it |
+| A browser window did not come back, and the log says the browser reopened its others | the browser forgot it, because Omarchy closed it before the browser quit. The rows under [Let apps save before the power goes](#let-apps-save-before-the-power-goes) prevent that |
 | Is the plugin running? | `omarchy plugin list --json \| jq '.[] \| select(.id == "io.github.asmyshlyaev177.last-session")'` |
 
 All four files live in `~/.local/state/omarchy-last-session`.

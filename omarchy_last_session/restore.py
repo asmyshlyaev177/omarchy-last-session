@@ -1,7 +1,8 @@
 """The restore pass: launch, sweep, group, then name workspaces and place them on monitors."""
 
-import difflib
+import dataclasses
 import os
+import re
 import shlex
 import time
 
@@ -24,10 +25,22 @@ def restore_session():
     launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
     placed, missing = sweep(ordered, set(already_open), origins)
     for win in missing:
-        warn(f"no window turned up for {win['class']}")
+        warn(describe_missing(win, placed, missing))
     build_groups(placed)
     name_workspaces(windows)
     place_workspaces_on_monitors(windows)
+
+
+def describe_missing(win, placed, missing):
+    cls, workspace = win["class"], win["workspace"].get("id")
+    line = f"no window turned up for {cls} '{win.get('title', '')}' from workspace {workspace}"
+    reopened = sum(entry["class"] == cls for entry, _ in placed)
+    if cls not in config.SESSION_KEEPING_CLASSES or not reopened:
+        return line
+    # Running and back with its other windows: its own session dropped this one,
+    # as Chromium does with a window Omarchy's power menu closes before it quits.
+    total = reopened + sum(entry["class"] == cls for entry in missing)
+    return f"{line}; {cls} reopened {reopened} of its {total} windows"
 
 
 def sort_for_launch(windows):
@@ -46,6 +59,7 @@ def launch_saved_windows(windows, origins, running):
             chromium.mark_clean_exit(win["class"], win["cmd"])
         rules = build_exec_rules(win, origins)
         hypr.dispatch(f"hl.dsp.exec_cmd({hypr.quote_lua_long(win['cmd'])}, {rules})")
+        log(f"launched {win['class']} onto workspace {hypr.format_workspace_selector(win['workspace'])}")
         time.sleep(config.SPAWN_STAGGER)
 
 
@@ -92,70 +106,137 @@ def sweep(pending, seen, origins):
     (entry, address) pairs placed and the entries that never got a window."""
     pending = list(pending)
     placed = []
-    first_seen = {}
+    watched = {}
     deadline = time.time() + config.SWEEP_TIMEOUT
     while pending:
         time.sleep(1)
         now = time.time()
         if now >= deadline:
             break
-        placed += place_new_arrivals(pending, seen, origins, first_seen, now, deadline)
+        placed += place_new_arrivals(pending, seen, origins, watched, now, deadline)
     return placed, pending
 
 
-def place_new_arrivals(pending, seen, origins, first_seen, now, deadline):
-    """One pass over the desktop. Updates pending and seen in place."""
-    placed = []
-    for address, client in hypr.get_managed_clients().items():
-        if address in seen:
-            continue
-        first_seen.setdefault(address, now)
-        if is_worth_waiting_for(client, first_seen[address], now, deadline):
-            continue
-        entry = match_saved_entry(pending, client)
-        if entry is None:
-            continue
+@dataclasses.dataclass
+class Sighting:
+    """A window the sweep has yet to pair: when it turned up, its title at the
+    last pass, and whether that title had stopped changing by then."""
+
+    first_seen: float
+    title: str
+    is_settled: bool = False
+
+
+def place_new_arrivals(pending, seen, origins, watched, now, deadline):
+    """One pass over the desktop. Updates pending, seen and watched in place."""
+    in_play = {
+        address: client
+        for address, client in hypr.get_managed_clients().items()
+        if address not in seen and find_candidates(pending, client)
+    }
+    watch_titles(in_play, watched, now)
+    ready = find_ready_windows(pending, in_play, watched, now, deadline)
+    placed = pair_arrivals(pending, ready)
+    for entry, address in placed:
         pending.remove(entry)
         seen.add(address)
-        placed.append((entry, address))
-        # Moving one member of a group moves the whole group; a group of one
-        # is still just a window.
-        fixing = len(client.get("grouped") or []) <= 1 and is_out_of_place(entry, client, origins)
-        log(describe_pairing(entry, client, fixing))
-        if fixing:
-            place_window(entry, address, origins, floating=bool(client.get("floating")))
+        place_arrival(entry, address, ready[address], origins)
     return placed
 
 
-def is_worth_waiting_for(client, first_seen_at, now, deadline):
-    """A window still titled Untitled or New Tab says nothing about which saved
-    window it is, so it gets TITLE_SETTLE seconds to say more."""
-    if not is_still_loading(client.get("title", "")):
-        return False
-    return now < min(first_seen_at + config.TITLE_SETTLE, deadline - 1)
+def watch_titles(in_play, watched, now):
+    """Logs the title each window turns up with and every change after it: a
+    browser titles a window long before its page has loaded."""
+    for address, client in in_play.items():
+        cls, title, before = client.get("class", ""), client.get("title", ""), watched.get(address)
+        if before is None:
+            log(f"{cls} {address} turned up on workspace {client['workspace'].get('id')} titled '{title}'")
+            watched[address] = Sighting(now, title)
+            continue
+        if title != before.title:
+            log(f"{cls} {address} is now titled '{title}'")
+        watched[address] = Sighting(before.first_seen, title, has_title_settled(before.title, title))
 
 
-def describe_pairing(entry, client, fixing):
+def find_ready_windows(pending, in_play, watched, now, deadline):
+    """The windows to pair this pass: all of a class together, once titles can
+    tell them apart or TITLE_SETTLE has passed since the last of them turned up."""
+    ready = {}
+    for cls, rivals in group_by_class(in_play).items():
+        wanted = len(set().union(*(find_candidates(pending, client) for client in rivals.values())))
+        unsettled = sum(not watched[address].is_settled for address in rivals)
+        if can_tell_apart(len(rivals), wanted, unsettled):
+            ready.update(rivals)
+            continue
+        waited = now - max(watched[address].first_seen for address in rivals)
+        if waited >= config.TITLE_SETTLE or now >= deadline - 1:
+            log(
+                f"waited {waited:.0f} s for {cls} windows: {len(rivals)} of {wanted} turned up,"
+                f" {unsettled} still changing titles"
+            )
+            ready.update(rivals)
+    return ready
+
+
+def can_tell_apart(windows, entries, unsettled):
+    """Once every rival has turned up and its title has settled. A lone window
+    with one entry to take has nothing to be told apart from."""
+    return (windows == 1 and entries == 1) or (windows >= entries and unsettled == 0)
+
+
+def group_by_class(clients):
+    classes = {}
+    for address, client in clients.items():
+        classes.setdefault(client.get("class", ""), {})[address] = client
+    return classes
+
+
+def pair_arrivals(pending, arrivals):
+    """(entry, address) pairs, the closest fit first: paired in the order Hyprland
+    listed them, a window that barely fitted an entry took it from one that fitted it well."""
+    fits = []
+    for address, client in arrivals.items():
+        live_argv = get_client_argv(client)
+        fits += [
+            (score_fit(pending[i], client, live_argv), address, i) for i in find_candidates(pending, client)
+        ]
+    pairs, paired_addresses, paired_entries = [], set(), set()
+    for _, address, index in sorted(fits, key=lambda fit: fit[0], reverse=True):
+        if address in paired_addresses or index in paired_entries:
+            continue
+        paired_addresses.add(address)
+        paired_entries.add(index)
+        pairs.append((pending[index], address))
+    return pairs
+
+
+def place_arrival(entry, address, client, origins):
+    # Moving one member of a group moves the whole group; a group of one
+    # is still just a window.
+    fixing = len(client.get("grouped") or []) <= 1 and is_out_of_place(entry, client, origins)
+    log(describe_pairing(entry, address, client, fixing))
+    if fixing:
+        place_window(entry, address, origins, floating=bool(client.get("floating")))
+
+
+def describe_pairing(entry, address, client, fixing):
     command, title, _ = score_fit(entry, client, get_client_argv(client))
     return (
-        f"{client.get('class', '')} '{client.get('title', '')}' on workspace {client['workspace'].get('id')}"
+        f"{client.get('class', '')} {address} '{client.get('title', '')}'"
+        f" on workspace {client['workspace'].get('id')}"
         f" is the saved '{entry.get('title', '')}' from workspace {entry['workspace'].get('id')}"
         f" (command {command}, title {title:.2f}); {'placing it' if fixing else 'already in place'}"
     )
 
 
-def match_saved_entry(pending, client):
-    """The saved entry for a live window: by class, or failing that by the
-    program behind it, since Chromium reports chromium-browser when relaunched
-    from a command line rather than from its desktop entry."""
-    live_argv = get_client_argv(client)
-    candidates = [win for win in pending if win["class"] == client.get("class", "")]
-    if not candidates:
-        program = get_program_name_of(live_argv)
-        candidates = [win for win in pending if program and get_program_name(win.get("cmd", "")) == program]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda win: score_fit(win, client, live_argv))
+def find_candidates(pending, client):
+    """Indexes of the entries a window may be: of its class, or else of its program,
+    since Chromium reports chromium-browser when relaunched from a command line."""
+    by_class = [i for i, win in enumerate(pending) if win["class"] == client.get("class", "")]
+    if by_class:
+        return by_class
+    program = get_program_name_of(get_client_argv(client))
+    return [i for i, win in enumerate(pending) if program and get_program_name(win.get("cmd", "")) == program]
 
 
 def score_fit(win, client, live_argv):
@@ -187,16 +268,35 @@ def score_command_match(cmd, live_argv):
 TITLE_SEPARATORS = (" - ", " \u2014 ")
 # What a browser titles a window until its page has loaded.
 PLACEHOLDER_PAGES = frozenset(("untitled", "new tab", "about:blank"))
+# Titles are compared by the words they share: two unrelated long titles have
+# more letters in common by chance than a page's early title has with its own.
+WORD = re.compile(r"\w+")
 
 
 def score_title_likeness(saved, live):
-    """How close two titles are, without the app name both end in. A title that
-    is still a placeholder, or missing, scores zero rather than match on the
-    app name alone."""
+    """The share of words two titles have in common, without the app name both end
+    in. A placeholder or missing title scores zero rather than match on the app name."""
     saved_page, live_page = strip_shared_app_name(saved, live)
     if not saved_page or not live_page or is_placeholder(saved_page) or is_placeholder(live_page):
         return 0.0
-    return difflib.SequenceMatcher(None, saved_page, live_page).ratio()
+    saved_words, live_words = get_words(saved_page), get_words(live_page)
+    if not saved_words or not live_words:
+        return float(saved_page == live_page)
+    return 2 * len(saved_words & live_words) / (len(saved_words) + len(live_words))
+
+
+def has_title_settled(before, after):
+    """The same words a pass apart, numbers aside, and no placeholder: a price or
+    an unread count keeps moving on a page that has loaded."""
+    return not is_still_loading(after) and drop_numbers(get_words(before)) == drop_numbers(get_words(after))
+
+
+def get_words(text):
+    return set(WORD.findall(text.lower()))
+
+
+def drop_numbers(words):
+    return {word for word in words if not word.isdigit()}
 
 
 def strip_shared_app_name(saved, live):

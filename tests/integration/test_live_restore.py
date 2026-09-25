@@ -28,6 +28,30 @@ LIVE = os.environ.get("OLS_LIVE_TESTS") == "1" and all(
 MONITORS = ("MON-A", "MON-B")
 # Kitty appends its pid, so every instance answers on its own socket.
 KITTY_SOCKET = "olskitty"
+# The real browser; bin/chromium, first on PATH, is the stand-in the other tests use.
+CHROMIUM = "/usr/bin/chromium"
+# The container has no setuid sandbox, GPU or keyring, and a /dev/shm too small
+# for it. Wayland is forced so it is a native client, as on the desktop.
+CHROMIUM_FLAGS = (
+    "--no-sandbox --disable-gpu --disable-dev-shm-usage --password-store=basic"
+    " --no-first-run --no-default-browser-check --ozone-platform=wayland"
+)
+# Pages shaped like the ones that swapped monitors on the desktop.
+BROWSER_PAGES = {
+    # Bybit titles its page with the site's name until the price loads, then
+    # with a price that changes every second.
+    "trade.html": "<title>Bybit</title><script>let price = 84388.9;"
+    " setTimeout(function tick() { price += 0.1; document.title = '▲ ' + price.toFixed(1)"
+    " + ' | Trade BTCUSDT | Bybit Perpetual Contracts'; setTimeout(tick, 1000); }, 2000);</script>",
+    "dashboard.html": "<title>JobBot Dashboard</title>",
+    # Moves on to another page after the save, so the snapshot is out of date
+    # for this window, as it can be by up to a minute.
+    "home.html": "<title>Home / X</title>"
+    "<script>setTimeout(() => location.href = 'article.html', 6000);</script>",
+    "article.html": "<title>Brent oil - Price - Chart - Historical Data - News</title>",
+}
+# A word each page's title keeps, however the rest of it moves.
+PAGE_WORDS = (("Bybit", "trade"), ("JobBot", "dashboard"), ("Home / X", "news"), ("Brent oil", "news"))
 
 
 def wait_for(probe, what, timeout=20, log=lambda: ""):
@@ -288,6 +312,28 @@ def app_name(cls):
     return "chromium" if cls.startswith("chromium") else cls
 
 
+def browser_windows(session):
+    """The workspace and monitor of each browser window, by the page it shows.
+    A window showing none of the pages is keyed by its whole title."""
+    return {
+        next((page for word, page in PAGE_WORDS if word in w["title"]), w["title"]): (
+            w["workspace"]["id"],
+            w["monitor_name"],
+        )
+        for w in session["windows"]
+        if app_name(w["class"]) == "chromium"
+    }
+
+
+def is_running(pid):
+    """A zombie has exited, whatever /proc still shows for it."""
+    try:
+        with open(f"/proc/{pid}/stat") as f:
+            return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+    except (OSError, IndexError):
+        return False
+
+
 def shape(session):
     """What restore must reproduce, in a form that survives a reboot: no
     addresses, pids, titles, or tiled geometry. The command carries a
@@ -511,6 +557,53 @@ class LiveRestore(unittest.TestCase):
         self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
         after = self.snapshot("save", "state-after")
         self.assertEqual(tabs_by_monitor(after), before, c.requests())
+
+    def test_real_browser_windows_come_back_on_their_own_monitors(self):
+        """Brave windows came back on each other's monitors in 4 of 12 boots in
+        September 2026. Chromium reopens its windows all at once, each titled
+        with whatever its page shows so far, and a window whose page had moved
+        on since the save, or still showed only the site's name, was paired
+        with another window's entry. Here a real Chromium reopens pages whose
+        titles arrive after the page, as the real sites' do."""
+        c = self.comp
+        c.boot(MONITORS)
+        for name, html in BROWSER_PAGES.items():
+            with open(os.path.join(c.home, name), "w", encoding="utf-8") as f:
+                f.write(f'<meta charset="utf-8">{html}\n')
+
+        def open_page(name):
+            return c.open_window(f"{CHROMIUM} {CHROMIUM_FLAGS} --new-window file://{c.home}/{name}")
+
+        # Started bare, as from the app launcher, so its command line names no
+        # page; its first window is closed once the others are open.
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        blank = c.open_window(f"{CHROMIUM} {CHROMIUM_FLAGS}")
+        trade = open_page("trade.html")
+        # workspace 3 is created on the focused monitor, MON-A
+        c.dispatch("hl.dsp.focus({ workspace = 3 })")
+        open_page("dashboard.html")
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        news = open_page("home.html")
+        c.dispatch(f"hl.dsp.window.close({{ window = {address(blank)} }})")
+        wait_for(
+            lambda: blank["address"] not in {w["address"] for w in c.clients()}, "the blank window to close"
+        )
+        wait_for(lambda: "Trade BTCUSDT" in c.window(trade)["title"], "the price to load")
+        wait_for(lambda: c.window(news)["title"].startswith("Home / X"), "the news page")
+
+        saved = self.snapshot("save", "state")
+        before = browser_windows(saved)
+        self.assertEqual(before, {"trade": (1, "MON-A"), "dashboard": (3, "MON-A"), "news": (2, "MON-B")})
+        wait_for(lambda: c.window(news)["title"].startswith("Brent oil"), "the news window to move on")
+        time.sleep(3)  # Chromium writes its session file 2.5 s after a change
+        c.shutdown()
+        wait_for(lambda: not is_running(trade["pid"]), "Chromium to exit with its compositor")
+
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        after = self.snapshot("save", "state-after")
+        self.assertEqual(browser_windows(after), before, restored.stdout)
 
     def test_an_editor_is_launched_once_for_all_of_its_windows(self):
         """One process serves every window of the editor and it reopens them
