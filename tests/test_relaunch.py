@@ -255,3 +255,46 @@ class ChromiumClasses(unittest.TestCase):
                 cmd = relaunch.add_restore_flag("/usr/lib/chromium/chromium", cls)
                 self.assertTrue(cmd.endswith("--restore-last-session"))
                 self.assertIn(cls, config.SESSION_KEEPING_CLASSES)
+
+
+class ChromiumWebApps(unittest.TestCase):
+    """Chromium runs every window, web apps included, in one process, whose
+    command line is that of the launch that started it. When a web app started
+    it, the browser was saved as that web app and came back as a second copy
+    of it, with none of its own windows (2026-09-25, WhatsApp in Chrome)."""
+
+    CHROME = "/opt/google/chrome/chrome"
+    WHATSAPP = "chrome-web.whatsapp.com__-Default"
+
+    def relaunch(self, cls, argv):
+        with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=list(argv)):
+            return relaunch.build_relaunch_command(client(cls, pid=7))
+
+    def test_a_browser_started_by_a_web_app_is_relaunched_as_the_browser(self):
+        cmd = self.relaunch("google-chrome", [self.CHROME, "--app=https://web.whatsapp.com/"])
+        self.assertEqual(cmd, f"{self.CHROME} --restore-last-session")
+
+    def test_a_web_app_keeps_the_url_it_was_started_with(self):
+        cmd = self.relaunch(self.WHATSAPP, [self.CHROME, "--app=https://web.whatsapp.com/"])
+        self.assertEqual(cmd, f"{self.CHROME} --app=https://web.whatsapp.com/")
+
+    def test_a_web_app_in_a_browser_started_normally_gets_its_url_from_its_class(self):
+        cmd = self.relaunch(self.WHATSAPP, [self.CHROME])
+        self.assertEqual(cmd, f"{self.CHROME} --app=https://web.whatsapp.com/")
+
+    def test_a_web_app_does_not_take_another_web_apps_url(self):
+        cmd = self.relaunch(
+            "chrome-app.example.com__inbox-Default", [self.CHROME, "--app=https://web.whatsapp.com/"]
+        )
+        self.assertEqual(cmd, f"{self.CHROME} --app=https://app.example.com/inbox")
+
+    def test_a_browser_started_by_an_installed_web_app_drops_its_app_id(self):
+        cmd = self.relaunch(
+            "brave-browser", ["/opt/brave-bin/brave", "--app-id=abcdefghijklmnopabcdefghijklmnop"]
+        )
+        self.assertEqual(cmd, "/opt/brave-bin/brave --restore-last-session")
+
+    def test_an_app_that_is_not_a_browser_keeps_its_app_flag(self):
+        self.assertEqual(
+            self.relaunch("someapp", ["/usr/bin/someapp", "--app=x"]), "/usr/bin/someapp --app=x"
+        )

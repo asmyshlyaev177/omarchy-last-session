@@ -1,6 +1,37 @@
-"""After the sweep: groups rebuilt, workspace names put back, workspaces moved onto their monitors."""
+"""Workspaces held open through the pass, then after the sweep: groups rebuilt,
+workspace names put back, workspaces moved onto their monitors."""
 
 from omarchy_last_session import hypr
+
+# The Lua global holding the rules hold_workspaces added, so release_workspaces
+# can switch them off: a rule added at runtime has no other handle.
+HOLDS = "_G.omarchy_last_session_holds"
+
+
+def hold_workspaces(windows):
+    """Makes every saved numbered workspace persistent until release_workspaces.
+    Without it a workspace exists only once a window lands on it, in whatever
+    order the apps come up, and a setup that closes gaps in the numbering moves
+    workspace 3 into 2 while 2's windows are still loading."""
+    numbers = sorted(
+        {
+            w["workspace"].get("id")
+            for w in windows
+            if isinstance(w["workspace"].get("id"), int) and w["workspace"]["id"] > 0
+        }
+    )
+    if not numbers:
+        return 0
+    rules = ", ".join(
+        f"hl.workspace_rule({{ workspace = {hypr.quote_lua(str(n))}, persistent = true }})" for n in numbers
+    )
+    hypr.eval_lua(f"{HOLDS} = {{ {rules} }}")
+    return len(numbers)
+
+
+def release_workspaces():
+    """An empty workspace goes once it is no longer held, as it would have."""
+    hypr.eval_lua(f"for _, rule in ipairs({HOLDS} or {{}}) do rule:set_enabled(false) end {HOLDS} = nil")
 
 
 def build_groups(placed):

@@ -45,6 +45,27 @@ class Save(StateDirCase):
             self.save_with([client("jobbot-search")])
         self.assertEqual(self.read_session(), [])
 
+    def test_a_web_app_listed_before_its_browser_leaves_the_browser_launched(self):
+        """A web app window shares its browser's process but has a launch of its
+        own; taking it for the process's launch left the browser's windows with
+        none, so nothing reopened them."""
+        chrome = "/opt/google/chrome/chrome"
+        three = [
+            client("chrome-web.whatsapp.com__-Default", pid=7),
+            client("google-chrome", pid=7),
+            client("google-chrome", pid=7),
+        ]
+        with pretend_runnable():
+            self.save_with(three, cmdline=(chrome,))
+        self.assertEqual(
+            [(w["class"], w["spawn"], w["cmd"]) for w in self.read_session()],
+            [
+                ("chrome-web.whatsapp.com__-Default", True, f"{chrome} --app=https://web.whatsapp.com/"),
+                ("google-chrome", True, f"{chrome} --restore-last-session"),
+                ("google-chrome", False, f"{chrome} --restore-last-session"),
+            ],
+        )
+
 
 class SecondWindowOfOneProcess(StateDirCase):
     """Nautilus reopens nothing by itself, so every window of its has to be
