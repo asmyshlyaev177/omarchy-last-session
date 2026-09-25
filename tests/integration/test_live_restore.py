@@ -7,17 +7,23 @@ them. Hyprland's backend needs a DRM device, so it runs nested in a headless
 labwc on the host's render node.
 """
 
+import functools
 import glob
+import http.server
 import json
 import os
 import pathlib
+import select
 import shutil
 import signal
+import struct
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(HERE)), "bin", "omarchy-last-session")
@@ -26,6 +32,8 @@ LIVE = os.environ.get("OLS_LIVE_TESTS") == "1" and all(
     shutil.which(binary) for binary in ("Hyprland", "labwc", "foot")
 )
 MONITORS = ("MON-A", "MON-B")
+# A laptop docked to two monitors, which Hyprland gives workspaces 1, 2 and 3 in this order.
+DOCKED = ("eDP-1", "DP-9", "HDMI-A-1")
 # Kitty appends its pid, so every instance answers on its own socket.
 KITTY_SOCKET = "olskitty"
 # The real browser; bin/chromium, first on PATH, is the stand-in the other tests use.
@@ -54,6 +62,46 @@ BROWSER_PAGES = {
 PAGE_WORDS = (("Bybit", "trade"), ("JobBot", "dashboard"), ("Home / X", "news"), ("Brent oil", "news"))
 
 
+def make_png(size, rgb):
+    """A square PNG of one colour."""
+    rows = b"".join(b"\0" + bytes(rgb) * size for _ in range(size))
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+
+    header = struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", header)
+        + chunk(b"IDAT", zlib.compress(rows))
+        + chunk(b"IEND", b"")
+    )
+
+
+# A web app to install as the browser's Install button does, named and titled as Brave's
+# WhatsApp Web is. Chromium refuses to install one whose manifest has no icon.
+INSTALLABLE_APP = {
+    "chat.html": b'<meta charset="utf-8"><title>WhatsApp Web</title>'
+    b'<link rel="manifest" href="manifest.json">',
+    "manifest.json": json.dumps(
+        {
+            "name": "WhatsApp Web",
+            "short_name": "WhatsApp",
+            "id": "/chat.html",
+            "start_url": "/chat.html",
+            "display": "standalone",
+            "icons": [{"src": "icon.png", "sizes": "192x192", "type": "image/png"}],
+        }
+    ).encode(),
+    "icon.png": make_png(192, (37, 211, 102)),
+}
+
+
+class QuietHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, format, *args):
+        pass  # one line per request would bury the test's own output
+
+
 def wait_for(probe, what, timeout=20, log=lambda: ""):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -66,6 +114,20 @@ def wait_for(probe, what, timeout=20, log=lambda: ""):
 
 def address(client):
     return f"'address:{client['address']}'"
+
+
+def read_devtools_answer(answers, number, pending):
+    """The answer to DevTools command `number`, and what was read past it. Chromium ends
+    each message it writes to the pipe with a NUL."""
+    while select.select([answers], [], [], 30)[0]:
+        chunk = os.read(answers, 1 << 16)
+        if not chunk:
+            break
+        *messages, pending = (pending + chunk).split(b"\0")
+        answer = next((m for m in map(json.loads, messages) if m.get("id") == number), None)
+        if answer is not None:
+            return answer, pending
+    raise AssertionError(f"Chromium gave no answer to DevTools command {number}")
 
 
 class Compositor:
@@ -191,6 +253,14 @@ class Compositor:
     def clients(self):
         return [c for c in self.json("clients") if c.get("mapped") and c.get("class")]
 
+    def shown_workspaces(self):
+        return {m["name"]: m["activeWorkspace"]["name"] for m in self.json("monitors")}
+
+    def window_places(self):
+        """Each window's workspace and monitor, by name: a named workspace's number changes."""
+        monitors = {m["id"]: m["name"] for m in self.json("monitors")}
+        return {c["class"]: (c["workspace"]["name"], monitors.get(c["monitor"])) for c in self.clients()}
+
     def window(self, client):
         return next(c for c in self.clients() if c["address"] == client["address"])
 
@@ -219,6 +289,44 @@ class Compositor:
         if check and done.returncode != 0:
             raise AssertionError("kitten {} failed: {}{}".format(" ".join(args), done.stdout, done.stderr))
         return done.stdout if done.returncode == 0 else ""
+
+    def install_web_app(self, url):
+        """Installs the web app at url as the browser's Install button does, in a Chromium run
+        of its own driven over DevTools, and returns the command of the .desktop entry it writes."""
+        commands_in, commands = os.pipe()
+        answers, answers_out = os.pipe()
+        # --remote-debugging-pipe takes DevTools commands on fd 3 and answers on fd 4.
+        redirect = f'exec 3<&{commands_in} 4>&{answers_out}; exec "$@"'
+        browser = subprocess.Popen(
+            ["bash", "-c", redirect, "bash", CHROMIUM, "--remote-debugging-pipe"],
+            pass_fds=(commands_in, answers_out),
+            env=self.env,
+            stdout=self._log("chromium"),
+            stderr=subprocess.STDOUT,
+        )
+        os.close(commands_in)
+        os.close(answers_out)
+        pending = b""
+        calls = (
+            ("PWA.install", {"manifestId": url, "installUrlOrBundleUrl": url}),
+            # Installed this way it opens in a tab; the Install button makes it open in its own window.
+            ("PWA.changeAppUserSettings", {"manifestId": url, "displayMode": "standalone"}),
+            ("Browser.close", {}),
+        )
+        for number, (method, params) in enumerate(calls, 1):
+            os.write(
+                commands, json.dumps({"id": number, "method": method, "params": params}).encode() + b"\0"
+            )
+            answer, pending = read_devtools_answer(answers, number, pending)
+            if "error" in answer:
+                raise AssertionError(f"{method} failed: {answer['error']}")
+        browser.wait(20)
+        os.close(commands)
+        os.close(answers)
+        apps = os.path.join(self.home, ".local", "share", "applications", "chrome-*.desktop")
+        (entry,) = wait_for(lambda: glob.glob(apps), "the app's .desktop entry")
+        with open(entry) as f:
+            return next(line[len("Exec=") :] for line in f.read().splitlines() if line.startswith("Exec="))
 
     def config_file(self):
         return os.path.join(self.home, ".config", "omarchy", "last-session.ini")
@@ -323,6 +431,11 @@ def browser_windows(session):
         for w in session["windows"]
         if app_name(w["class"]) == "chromium"
     }
+
+
+def windows_by_page(session):
+    """Every window's app and workspace, by the page it shows."""
+    return sorted((w["title"], app_name(w["class"]), w["workspace"]["id"]) for w in session["windows"])
 
 
 def is_running(pid):
@@ -435,6 +548,87 @@ class LiveRestore(unittest.TestCase):
         os.makedirs(os.path.dirname(path), exist_ok=True)
         with open(path, "w") as f:
             f.write("allow_remote_control socket-only\nlisten_on unix:@{}\n".format(KITTY_SOCKET))
+
+    def write_browser_pages(self):
+        for name, html in BROWSER_PAGES.items():
+            with open(os.path.join(self.comp.home, name), "w", encoding="utf-8") as f:
+                f.write(f'<meta charset="utf-8">{html}\n')
+
+    def write_chromium_flags(self):
+        """Omarchy gives the browser its flags in ~/.config/<browser>-flags.conf, which Arch's
+        launcher puts on the command line restore saves. The proxy, where nothing listens,
+        keeps a web app off the network and titled with its host, as the real WhatsApp is."""
+        path = os.path.join(self.comp.home, ".config", "chromium-flags.conf")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write("\n".join(CHROMIUM_FLAGS.split() + ["--proxy-server=127.0.0.1:9"]) + "\n")
+
+    def has_chromium_saved(self, pages):
+        """Whether Chromium's newest session file holds every page's URL, which it stores as plain text."""
+        sessions = glob.glob(
+            os.path.join(self.comp.home, ".config", "chromium", "Default", "Sessions", "Session_*")
+        )
+        if not sessions:
+            return False
+        with open(max(sessions, key=os.path.getmtime), "rb") as f:
+            saved = f.read()
+        return all(page.encode() in saved for page in pages)
+
+    def restore_after_reboot(self, state, pages):
+        """Logs out once Chromium has written `pages` to its session file, then logs back
+        in and restores from `state`."""
+        c = self.comp
+        pids = {w["pid"] for w in c.clients()}
+        # Chromium writes the file 2.5 s after a change, and later on a busy machine:
+        # a fixed 3 s wait lost both pages once in a full run of the suite.
+        wait_for(lambda: self.has_chromium_saved(pages), "Chromium to write its session file")
+        c.shutdown()
+        wait_for(lambda: not any(is_running(pid) for pid in pids), "every app to exit with its compositor")
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, state))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+
+    def serve(self, files):
+        """Serves files over HTTP from this process, so the site outlives every login of the test."""
+        site = os.path.join(self.work, "site")
+        os.makedirs(site)
+        for name, data in files.items():
+            with open(os.path.join(site, name), "wb") as f:
+                f.write(data)
+        server = http.server.ThreadingHTTPServer(
+            ("127.0.0.1", 0), functools.partial(QuietHandler, directory=site)
+        )
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return f"http://127.0.0.1:{server.server_address[1]}"
+
+    def assert_web_app_comes_back_beside_its_browser(self, app_command, app_title, app_flag):
+        """The web app is opened first, so it starts the browser, then a browser window beside it
+        and one on workspace 2. The first login restores what the web app started, the second
+        what restore started: the browser, with the web app joining it."""
+        c = self.comp
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        app = c.open_window(app_command)
+        dashboard = c.open_window(f"{CHROMIUM} --new-window file://{c.home}/dashboard.html")
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        news = c.open_window(f"{CHROMIUM} --new-window file://{c.home}/article.html")
+        wait_for(lambda: c.window(app)["title"] == app_title, "the web app's page")
+        wait_for(lambda: c.window(dashboard)["title"].startswith("JobBot"), "the dashboard")
+        wait_for(lambda: c.window(news)["title"].startswith("Brent oil"), "the news page")
+
+        saved = self.snapshot("save", "state")
+        with self.subTest("one launch reopens the browser and one the web app"):
+            launches = sorted(
+                (app_name(w["class"]), app_flag in w["cmd"]) for w in saved["windows"] if w["spawn"]
+            )
+            self.assertEqual(launches, [(app["class"], True), ("chromium", False)])
+
+        pages = ("dashboard.html", "article.html")
+        for state, state_after in (("state", "state-1"), ("state-1", "state-2")):
+            self.restore_after_reboot(state, pages)
+            restored = self.snapshot("save", state_after)
+            self.assertEqual(windows_by_page(restored), windows_by_page(saved), c.requests())
 
     def snapshot(self, action, name):
         state = os.path.join(self.work, name)
@@ -567,9 +761,7 @@ class LiveRestore(unittest.TestCase):
         titles arrive after the page, as the real sites' do."""
         c = self.comp
         c.boot(MONITORS)
-        for name, html in BROWSER_PAGES.items():
-            with open(os.path.join(c.home, name), "w", encoding="utf-8") as f:
-                f.write(f'<meta charset="utf-8">{html}\n')
+        self.write_browser_pages()
 
         def open_page(name):
             return c.open_window(f"{CHROMIUM} {CHROMIUM_FLAGS} --new-window file://{c.home}/{name}")
@@ -604,6 +796,29 @@ class LiveRestore(unittest.TestCase):
         self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
         after = self.snapshot("save", "state-after")
         self.assertEqual(browser_windows(after), before, restored.stdout)
+
+    def test_a_web_app_and_its_browser_come_back_as_themselves(self):
+        """A web app is a window of its browser's process, and /proc shows the command line
+        of whichever launch started that process. WhatsApp started Chrome, so every Chrome
+        window was saved as WhatsApp and restore brought back WhatsApp alone (2026-09-25).
+        The second login is the usual one: restore starts the browser and the web app joins it."""
+        self.comp.boot(MONITORS)
+        self.write_browser_pages()
+        self.write_chromium_flags()
+        self.assert_web_app_comes_back_beside_its_browser(
+            "omarchy-launch-webapp https://web.whatsapp.com/", "web.whatsapp.com", "--app="
+        )
+
+    def test_an_installed_web_app_and_its_browser_come_back_as_themselves(self):
+        """An app installed with the browser's Install button opens with --app-id, in the
+        browser's process as well. Saved with the browser's command line, Brave's WhatsApp Web
+        came back as a blank browser window (2026-09-25). Installed here the same way, it gets
+        a class and a .desktop entry shaped as Brave's are."""
+        self.comp.boot(MONITORS)
+        self.write_browser_pages()
+        self.write_chromium_flags()
+        app_command = self.comp.install_web_app(self.serve(INSTALLABLE_APP) + "/chat.html")
+        self.assert_web_app_comes_back_beside_its_browser(app_command, "WhatsApp Web", "--app-id=")
 
     def test_an_editor_is_launched_once_for_all_of_its_windows(self):
         """One process serves every window of the editor and it reopens them
@@ -765,6 +980,43 @@ class LiveRestore(unittest.TestCase):
                 self.assertEqual(c["monitor"], only["id"], self.comp.requests())
                 self.assertGreaterEqual(c["at"][0], only["x"], self.comp.requests())
                 self.assertLess(c["at"][0], only["x"] + only["width"], self.comp.requests())
+
+    def test_every_monitor_shows_its_workspace_and_every_workspace_is_on_its_monitor(self):
+        """A workspace moved onto a monitor is not the one it shows. The windows of DP-9 and
+        HDMI-A-1 came back onto workspaces moved there, behind empty ones (2026-09-25).
+        Workspace 4 and the named Home are out of sight behind the ones each monitor shows."""
+        c = self.comp
+        c.boot(DOCKED)
+        for number in (1, 2, 3):
+            c.dispatch(f"hl.dsp.focus({{ workspace = {number} }})")
+            c.open_window(f"foot --app-id=shown{number}")
+        # The workspace is made on the monitor focused when the window maps.
+        for shown, cls, hidden in ((2, "behind", "4"), (3, "named", "name:Home")):
+            c.dispatch(f"hl.dsp.focus({{ workspace = {shown} }})")
+            c.dispatch(f"hl.dsp.exec_cmd([[foot --app-id={cls}]], {{ workspace = '{hidden} silent' }})")
+            wait_for(lambda cls=cls: cls in c.window_places(), f"{cls} to map")
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        before = (c.shown_workspaces(), c.window_places())
+        self.assertEqual(
+            before,
+            (
+                {"eDP-1": "1", "DP-9": "2", "HDMI-A-1": "3"},
+                {
+                    "shown1": ("1", "eDP-1"),
+                    "shown2": ("2", "DP-9"),
+                    "shown3": ("3", "HDMI-A-1"),
+                    "behind": ("4", "DP-9"),
+                    "named": ("Home", "HDMI-A-1"),
+                },
+            ),
+        )
+        self.snapshot("shutdown", "state")
+
+        c.shutdown()
+        c.boot(DOCKED)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        self.assertEqual((c.shown_workspaces(), c.window_places()), before, c.requests())
 
     def test_a_renamed_workspace_comes_back_under_its_number(self):
         """A numbered workspace the user renamed keeps its number: the bar

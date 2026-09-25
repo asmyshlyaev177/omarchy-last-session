@@ -3,12 +3,24 @@ the app's .desktop entry."""
 
 import glob
 import os
+import re
 import shlex
 import shutil
+import urllib.parse
 
 from omarchy_last_session import config, proc
 
 HOME = os.path.expanduser("~")
+APP_FLAG = "--app="
+APP_ID_FLAG = "--app-id="
+# Flags that open one window as an app rather than the browser.
+APP_FLAG_PREFIXES = (APP_FLAG, APP_ID_FLAG)
+# The Wayland app id Chromium gives a window opened with --app=<url>: host and
+# path joined by "_", every "/" turned into "_", then the profile directory.
+WEB_APP_CLASS = re.compile(r"^(?:chrome|chromium|brave|msedge)-(?P<name>[^_/]+__.*)-(?P<profile>[^-]+)$")
+# The one it gives a window of an app installed with the Install button, opened
+# with --app-id=<id>: the app's 32-letter id, then the profile directory.
+INSTALLED_APP_CLASS = re.compile(r"^(?:chrome|chromium|brave|msedge)-(?P<app_id>[a-p]{32})-[^-]+$")
 
 
 def build_relaunch_command(client, session_file=None):
@@ -18,11 +30,51 @@ def build_relaunch_command(client, session_file=None):
         return shlex.join([config.TERMINALS[cls][0], config.KITTY_SESSION_FLAG, session_file])
     if cls in config.TERMINALS:
         return build_terminal_command(pid, cls)
-    argv = drop_per_run_args(unflatten_argv(proc.read_cmdline(pid) or []))
+    argv = fit_app_flags(drop_per_run_args(unflatten_argv(proc.read_cmdline(pid) or [])), cls)
     cmd = shlex.join(argv) if argv else ""
     if not is_replayable(cmd):
         cmd = find_desktop_command(cls) or ""
     return add_restore_flag(cmd, cls) if cmd else None
+
+
+def fit_app_flags(argv, cls):
+    """A Chromium browser is one process for all its windows, and its command
+    line is that of the launch that started it: when that was a web app, every
+    window reports the app's flag. A browser window drops it, and a web app
+    window gets its own back from its class."""
+    own = find_own_app_flag(cls, argv)
+    if own is None and cls not in config.CHROMIUM_BROWSERS:
+        return argv
+    kept = [arg for arg in argv if not arg.startswith(APP_FLAG_PREFIXES)]
+    return kept + [own] if own else kept
+
+
+def find_own_app_flag(cls, argv):
+    """--app-id=<id> for a window of an installed app, --app=<url> for one opened by URL."""
+    installed = INSTALLED_APP_CLASS.match(cls)
+    if installed:
+        return APP_ID_FLAG + installed["app_id"]
+    url = find_web_app_url(cls, argv)
+    return APP_FLAG + url if url else None
+
+
+def find_web_app_url(cls, argv):
+    """The --app URL a web app window was opened with: the one on the command
+    line when it names this window, else rebuilt from the class, which keeps
+    the host and path and loses the scheme and whether a "_" was a "/"."""
+    match = WEB_APP_CLASS.match(cls)
+    if not match:
+        return None
+    for arg in argv:
+        if arg.startswith(APP_FLAG) and get_web_app_name(arg[len(APP_FLAG) :]) == match["name"]:
+            return arg[len(APP_FLAG) :]
+    host, _, path = match["name"].partition("__")
+    return f"https://{host}/{path.replace('_', '/')}"
+
+
+def get_web_app_name(url):
+    parts = urllib.parse.urlsplit(url)
+    return f"{parts.hostname or ''}_{parts.path}".replace("/", "_")
 
 
 def build_terminal_command(pid, cls):

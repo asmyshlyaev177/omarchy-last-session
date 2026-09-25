@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 
 from omarchy_last_session import chromium, config, hypr, notification, proc, relaunch, restore, session
+from omarchy_last_session.restore import layout
 
 # Brave's real command line, as Chromium reports it: one argument holding the
 # whole thing, because it rewrites argv to set the process title.
@@ -224,6 +225,10 @@ class RestoreHarness(StateDirCase):
         self.patch(hypr, "query", mock.Mock(return_value=[]))
         # never touch a real browser profile
         self.patch(chromium, "mark_clean_exit", mock.Mock(return_value=0))
+        # held workspaces have tests of their own; here they would only shift
+        # every other line of Lua along
+        self.patch(layout, "hold_workspaces", mock.Mock(return_value=0))
+        self.patch(layout, "release_workspaces", mock.Mock())
 
     def run_restore(self, clients_sequence, sweep_timeout=0):
         """Every line of Lua restore sent, dispatched or evaluated, and each

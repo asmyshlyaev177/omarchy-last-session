@@ -2,7 +2,7 @@
 
 Session restore for [Omarchy](https://omarchy.org): saves the windows you have open and brings them back after a reboot, shutdown, logout or crash. An Omarchy shell plugin for Hyprland 0.55+.
 
-Every window is restored on the workspace and monitor it was on. Floating windows keep their position and size. Pinned, fullscreen and grouped windows come back in that state. Terminals reopen in their last working directory, and browsers keep their tabs. Saving is automatic, so there is no save step before you power off.
+Every window is restored on the workspace and monitor it was on. Floating windows keep their position and size. Pinned, fullscreen and grouped windows come back in that state. Terminals reopen in their last working directory, browsers keep their tabs, and web apps opened from a Chromium browser come back as their own windows. Saving is automatic, so there is no save step before you power off.
 
 Python 3.9, standard library only. No compositor patches and no extra daemons.
 

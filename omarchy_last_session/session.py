@@ -56,7 +56,7 @@ def snapshot_windows():
     group_of = assign_group_ids(clients)
     layout = hypr.get_monitor_layout()
     sessions = write_kitty_sessions(clients)
-    windows, seen_pids = [], set()
+    windows, launched = [], set()
     for client in clients:
         pid = client.get("pid", -1)
         if pid <= 0:
@@ -64,8 +64,13 @@ def snapshot_windows():
         cmd = relaunch.build_relaunch_command(client, sessions.get(pid))
         if not cmd:
             continue
-        spawn = pid not in seen_pids or not does_launch_once(client, pid in sessions)
-        seen_pids.add(pid)
+        once = does_launch_once(client, pid in sessions)
+        spawn = pid not in launched or not once
+        # Only a launch that brings back the whole process counts for it: a web
+        # app window shares its browser's process, and listed first it must not
+        # leave the browser unlaunched.
+        if once:
+            launched.add(pid)
         windows.append(build_window_entry(client, cmd, spawn, group_of.get(client.get("address")), layout))
     return windows
 

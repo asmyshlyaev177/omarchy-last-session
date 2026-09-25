@@ -1,8 +1,11 @@
 import io
+import itertools
 import sys
+import time
 import unittest
 from unittest import mock
 
+from omarchy_last_session import chromium, config, hypr, proc
 from omarchy_last_session.restore import launch
 from tests.helpers import RestoreHarness, live_window, saved_window
 
@@ -156,3 +159,64 @@ class LaunchedInParallel(RestoreHarness):
         with mock.patch.object(sys, "stderr", io.StringIO()) as err:
             self.run_restore([{}], sweep_timeout=3)
         self.assertIn("no window turned up for ghost", err.getvalue())
+
+
+class BrowserBeforeItsWebApps(unittest.TestCase):
+    """A web app launched while its browser is not running starts the browser
+    itself, without --restore-last-session, and Chromium ignores that flag on a
+    browser already running: it opens a new tab and none of the session."""
+
+    CHROME = "/opt/google/chrome/chrome"
+
+    def launch(self, windows, views):
+        sent = []
+
+        def poll():
+            sent.append("poll")
+            return views.pop(0) if len(views) > 1 else views[0]
+
+        with (
+            mock.patch.object(hypr, "get_managed_clients", side_effect=poll),
+            mock.patch.object(hypr, "dispatch", side_effect=sent.append),
+            mock.patch.object(chromium, "mark_clean_exit"),
+            mock.patch.object(proc, "read_cmdline", return_value=[self.CHROME]),
+            mock.patch.object(time, "sleep"),
+            mock.patch.object(time, "time", side_effect=itertools.count(1001)),
+            mock.patch.object(sys, "stdout", io.StringIO()),
+        ):
+            launch.launch_saved_windows(launch.sort_for_launch(windows), {}, set())
+        return ["poll" if line == "poll" else line.split("--")[-1].split("]]")[0] for line in sent]
+
+    def test_the_browser_is_launched_first_and_its_web_app_once_it_has_a_window(self):
+        windows = [
+            saved_window(
+                "chrome-web.whatsapp.com__-Default",
+                ws=-98,
+                cmd=f"{self.CHROME} --app=https://web.whatsapp.com/",
+            ),
+            saved_window("google-chrome", ws=3, cmd=f"{self.CHROME} --restore-last-session"),
+        ]
+        chrome_up = {"0xc": {"class": "google-chrome", "pid": 7}}
+        self.assertEqual(
+            self.launch(windows, [{}, {}, chrome_up]),
+            ["restore-last-session", "poll", "poll", "poll", "app=https://web.whatsapp.com/"],
+        )
+
+    def test_a_browser_that_never_opens_a_window_holds_its_web_apps_only_so_long(self):
+        windows = [
+            saved_window("google-chrome", cmd=f"{self.CHROME} --restore-last-session"),
+            saved_window(
+                "chrome-web.whatsapp.com__-Default", cmd=f"{self.CHROME} --app=https://web.whatsapp.com/"
+            ),
+        ]
+        with mock.patch.object(config, "BROWSER_START_TIMEOUT", 3):
+            sent = self.launch(windows, [{}])
+        self.assertEqual(sent[-1], "app=https://web.whatsapp.com/")
+        self.assertLessEqual(sent.count("poll"), 3)
+
+    def test_other_apps_are_not_held_up_by_a_starting_browser(self):
+        windows = [
+            saved_window("google-chrome", ws=1, cmd=f"{self.CHROME} --restore-last-session"),
+            saved_window("foot", ws=2, cmd="/usr/bin/foot"),
+        ]
+        self.assertNotIn("poll", self.launch(windows, [{}]))

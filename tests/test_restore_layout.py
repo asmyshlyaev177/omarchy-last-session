@@ -15,7 +15,11 @@ class WorkspaceMonitorPlacement(unittest.TestCase):
     TWO = [{"id": 0, "name": "eDP-1"}, {"id": 1, "name": "DP-9"}]
 
     def emit(self, windows, monitors, live_ws):
-        view = {f"0x{i}": {"class": "x", "workspace": {"id": ws}} for i, ws in enumerate(live_ws)}
+        """live_ws: the workspace of each live window, a number or a workspace dict."""
+        view = {
+            f"0x{i}": {"class": "x", "workspace": ws if isinstance(ws, dict) else {"id": ws, "name": str(ws)}}
+            for i, ws in enumerate(live_ws)
+        }
         with (
             mock.patch.object(hypr, "query", return_value=monitors),
             mock.patch.object(hypr, "get_managed_clients", return_value=view),
@@ -46,8 +50,16 @@ class WorkspaceMonitorPlacement(unittest.TestCase):
         self.assertEqual(self.emit([saved_window("x", ws=17, monitor_name="eDP-1")], self.TWO, []), (0, []))
 
     def test_special_workspace_is_skipped(self):
-        wins = [saved_window("x", ws=-99, monitor_name="eDP-1")]
-        self.assertEqual(self.emit(wins, self.TWO, [-99]), (0, []))
+        special = {"id": -98, "name": "special:scratchpad"}
+        wins = [dict(saved_window("x", monitor_name="eDP-1"), workspace=special)]
+        self.assertEqual(self.emit(wins, self.TWO, [special]), (0, []))
+
+    def test_a_named_workspace_moves_by_its_name_whatever_number_it_came_back_with(self):
+        wins = [dict(saved_window("x", monitor_name="DP-9"), workspace={"id": -1337, "name": "Home"})]
+        moved, emitted = self.emit(wins, self.TWO, [{"id": -1338, "name": "Home"}])
+        self.assertEqual(
+            (moved, emitted), (1, ["hl.dsp.workspace.move({ workspace = 'name:Home', monitor = 'DP-9' })"])
+        )
 
 
 class WorkspaceNaming(unittest.TestCase):
@@ -245,3 +257,78 @@ class ReportedBug(RestoreHarness):
         self.assertEqual(len([e for e in emitted if "group:add" in e]), 1)
         self.assertIn("no window turned up for org.kde.kdenlive", err.getvalue())
         self.assertFalse(any("lock" in e for e in emitted))
+
+
+class HeldWorkspaces(unittest.TestCase):
+    """A workspace exists only once a window lands on it, and apps come up in
+    no particular order. A setup that closes gaps in the numbering moved
+    workspace 3 into 2 while 2's browser windows were still loading, and every
+    window and name after that went to the wrong workspace (2026-09-25)."""
+
+    # A login with three monitors: Hyprland has given each a workspace, and those are all there is.
+    LOGIN = [{"id": 1, "name": "1"}, {"id": 2, "name": "2"}, {"id": 3, "name": "3"}]
+
+    def sent_by(self, action):
+        with (
+            mock.patch.object(hypr, "query", return_value=self.LOGIN),
+            mock.patch.object(hypr, "eval_lua") as eval_lua,
+        ):
+            action()
+        return [c.args[0] for c in eval_lua.call_args_list]
+
+    def test_workspaces_yet_to_exist_are_held_numbered_first_in_one_call(self):
+        windows = [
+            saved_window("a", ws=10, monitor_name="DP-9"),
+            dict(saved_window("b", monitor_name="HDMI-A-1"), workspace={"id": -1337, "name": "Home"}),
+            saved_window("c", ws=4, monitor_name="DP-9"),
+            saved_window("d", ws=10, monitor_name="DP-9"),
+        ]
+        self.assertEqual(
+            self.sent_by(lambda: layout.hold_workspaces(windows)),
+            [
+                f"{layout.HOLDS} = {{"
+                " hl.workspace_rule({ workspace = '4', persistent = true }),"
+                " hl.workspace_rule({ workspace = '10', persistent = true }),"
+                " hl.workspace_rule({ workspace = 'name:Home', persistent = true }) }"
+            ],
+        )
+
+    def test_a_workspace_that_already_exists_is_not_held(self):
+        windows = [
+            saved_window("a", ws=1, monitor_name="eDP-1"),
+            saved_window("b", ws=2, monitor_name="HDMI-A-1"),
+            dict(saved_window("c", monitor_name="HDMI-A-1"), workspace={"id": 3, "name": "Work"}),
+            dict(saved_window("d"), workspace={"id": -98, "name": "special:scratchpad"}),
+        ]
+        self.assertEqual(self.sent_by(lambda: layout.hold_workspaces(windows)), [])
+
+    def test_release_switches_off_every_rule_it_holds(self):
+        (sent,) = self.sent_by(layout.release_workspaces)
+        self.assertIn(f"ipairs({layout.HOLDS} or {{}})", sent)
+        self.assertIn("rule:set_enabled(false)", sent)
+
+
+class HeldWorkspacesInRestore(RestoreHarness):
+    def hold_and_release_into_timeline(self):
+        self.patch(layout, "hold_workspaces", mock.Mock(side_effect=lambda w: self.timeline.append("hold")))
+        self.patch(
+            layout, "release_workspaces", mock.Mock(side_effect=lambda: self.timeline.append("release"))
+        )
+
+    def test_workspaces_are_held_from_before_the_first_launch_until_after_the_last_move(self):
+        self.hold_and_release_into_timeline()
+        self.patch(hypr, "query", mock.Mock(return_value=[{"id": 1, "name": "1"}, {"id": 2, "name": "2"}]))
+        self.write_session([saved_window("code", ws=2, monitor_name="DP-2")])
+        emitted = self.run_restore([{}, {"0xa": live_window("code", ws=2)}])
+        self.assertEqual(emitted[0], "hold")
+        self.assertIn("exec_cmd", emitted[1])
+        self.assertIn("workspace.move", emitted[-2])
+        self.assertEqual(emitted[-1], "release")
+
+    def test_workspaces_are_released_when_restore_fails_part_way(self):
+        self.hold_and_release_into_timeline()
+        self.write_session([saved_window("code", ws=2)])
+        with mock.patch.object(layout, "build_groups", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                self.run_restore([{}])
+        self.assertEqual(self.timeline[-2:], ["release", "toast down: Restoring last session…"])

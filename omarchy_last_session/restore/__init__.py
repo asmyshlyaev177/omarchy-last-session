@@ -22,15 +22,23 @@ def restore_session():
         return
     session.keep_restore_copy()
     with show_toast(windows):
-        origins = hypr.get_monitor_origins()
-        ordered = launch.sort_for_launch(windows)
-        launch.launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
-        placed, missing = sweep.sweep(ordered, set(already_open), origins)
-        for win in missing:
-            warn(describe_missing(win, placed, missing))
-        layout.build_groups(placed)
-        layout.name_workspaces(windows)
-        layout.place_workspaces_on_monitors(windows)
+        layout.hold_workspaces(windows)
+        try:
+            restore_windows(windows, already_open)
+        finally:
+            layout.release_workspaces()
+
+
+def restore_windows(windows, already_open):
+    origins = hypr.get_monitor_origins()
+    ordered = launch.sort_for_launch(windows)
+    launch.launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
+    placed, missing = sweep.sweep(ordered, set(already_open), origins)
+    for win in missing:
+        warn(describe_missing(win, placed, missing))
+    layout.build_groups(placed)
+    layout.name_workspaces(windows)
+    layout.place_workspaces_on_monitors(windows)
 
 
 def show_toast(windows):
