@@ -89,11 +89,11 @@ class MarkCleanExit(ProfileCase):
         with open(path) as f:
             self.assertEqual(f.read(), "{not json")
 
-    def test_the_mode_of_preferences_is_kept(self):
+    def test_rewritten_preferences_are_readable_only_by_the_user(self):
         path = self.write_prefs("Default", {"profile": {"exit_type": "Crashed"}})
         os.chmod(path, 0o644)
         self.assertEqual(chromium.mark_clean_exit("brave-browser", "brave"), 1)
-        self.assertEqual(mode_of(path), 0o644)
+        self.assertEqual(mode_of(path), 0o600)
 
     def test_a_failed_write_leaves_preferences_as_they_were_and_no_temp_file(self):
         path = self.write_prefs("Default", {"profile": {"exit_type": "Crashed"}})
@@ -138,11 +138,11 @@ class TamperedProfile(ProfileCase):
 
     def test_a_symlink_planted_at_the_temp_name_is_not_chmodded_through(self):
         path = self.write_prefs("Default", {"profile": {"exit_type": "Crashed"}})
-        # A mode other than bashrc's, so a chmod through the link would show.
-        os.chmod(path, 0o644)
+        # A mode other than the 0600 the rewrite sets, so a chmod through the link would show.
+        os.chmod(self.bashrc, 0o644)
         self.plant_symlink_at_the_old_temp_name(path)
         self.assertEqual(chromium.mark_clean_exit("brave-browser", "brave"), 1)
-        self.assertEqual(mode_of(self.bashrc), 0o600)
+        self.assertEqual(mode_of(self.bashrc), 0o644)
 
     def test_a_symlink_in_place_of_preferences_is_neither_read_nor_written_through(self):
         elsewhere = os.path.join(self.dir.name, "other.json")

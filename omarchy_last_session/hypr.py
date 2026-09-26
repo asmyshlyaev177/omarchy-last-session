@@ -56,7 +56,8 @@ class Monitor(TypedDict, total=False):
     activeWorkspace: Workspace
 
 
-# "class" is a keyword, so the functional form.
+# "class" is a keyword, so the functional form. hyprctl writes every key here
+# for every window, so none is optional.
 Client = TypedDict(
     "Client",
     {
@@ -74,7 +75,6 @@ Client = TypedDict(
         "fullscreen": int,
         "grouped": list[str],
     },
-    total=False,
 )
 
 
@@ -146,7 +146,7 @@ def format_workspace_selector(workspace: Workspace) -> str:
     A numbered workspace goes by its number even when it has been renamed:
     name:x would make a new named workspace, which Hyprland numbers below zero."""
     name, number = workspace.get("name", ""), workspace.get("id", 0)
-    if isinstance(number, int) and number > 0:
+    if number > 0:
         return str(number)
     if name.startswith("special"):
         return name

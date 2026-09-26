@@ -104,6 +104,13 @@ class SplitTree(unittest.TestCase):
         """Kitty reports a lone pane as a pair holding only its `one` side."""
         self.assertEqual(self.render_panes({"one": 1}, 1), ["launch --var ols_pane=1 --cwd=/pane1"])
 
+    def test_a_pair_holding_only_its_two_side_is_one_launch(self):
+        self.assertEqual(self.render_panes({"two": 1}, 1), ["launch --var ols_pane=1 --cwd=/pane1"])
+
+    def test_a_pair_holding_no_pane_is_an_error(self):
+        with self.assertRaises(ValueError):
+            self.render_panes({"horizontal": False}, 1)
+
     def test_a_layout_that_is_not_splits_just_lists_its_panes(self):
         """Tall, grid and stack arrange the panes themselves, so the order they
         were opened in is the whole of it."""

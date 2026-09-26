@@ -1,6 +1,9 @@
 """Knobs. The ones a user may change come from the config file, which ships
 every default in SETTINGS and TABLES; everything else is a constant here."""
 
+# The knobs stay uppercase like any setting, though apply() rebinds them on every reload.
+# pyright: reportConstantRedefinition=false
+
 from __future__ import annotations
 
 import configparser
@@ -8,7 +11,7 @@ import math
 import os
 import re
 from collections.abc import Callable
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from omarchy_last_session import warn
 
@@ -35,12 +38,13 @@ FOOTER = """\
 # Setting name -> value. Each value is checked against its default's type when the
 # file is read (parse_value), so one table holds lists, strings and numbers alike.
 Settings = dict[str, Any]
+SettingValue = Union[list[str], str, float]
 # Binary, the flag that sets the working directory, the flag that runs a program.
 Terminal = tuple[str, str, Optional[str]]
 
 # [general]: key -> (default, the comment written above it in the file).
 # A list in the file replaces the default list.
-SETTINGS: dict[str, tuple[object, str]] = {
+SETTINGS: dict[str, tuple[SettingValue, str]] = {
     "exclude": (
         [],
         "Window classes never saved or restored. The shell's and the compositor's own\n"
@@ -378,7 +382,7 @@ def render_comment(doc: str) -> list[str]:
     return ["# " + line for line in doc.split("\n")]
 
 
-def render_entry(key: str, value: object) -> str:
+def render_entry(key: str, value: SettingValue | Terminal) -> str:
     if isinstance(value, (list, tuple)):
         value = ", ".join(part for part in value if part)
     return f"{key} = {value}".rstrip()

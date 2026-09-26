@@ -40,12 +40,12 @@ def set_exit_type_normal(path: str) -> bool:
     try:
         with files.open_regular_file(path) as f:
             prefs: dict[str, Any] = json.load(f)
-            mode = os.fstat(f.fileno()).st_mode & 0o777
         profile = prefs.setdefault("profile", {})
         if profile.get("exit_type") == "Normal":
             return False
         profile["exit_type"] = "Normal"
-        files.replace_file(path, json.dumps(prefs, ensure_ascii=False), mode)
+        # Chromium writes the file for the user alone, and the rewrite does too, whatever mode it had.
+        files.replace_file(path, json.dumps(prefs, ensure_ascii=False), 0o600)
         return True
     except (OSError, ValueError, AttributeError) as e:
         warn(f"could not mark {path} as cleanly exited: {e}")

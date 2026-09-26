@@ -26,6 +26,7 @@ import re
 import sys
 import time
 from collections.abc import Callable
+from typing import cast
 
 from omarchy_last_session import config, hypr, log, restore, session, warn
 
@@ -94,14 +95,20 @@ def read_power_rows(path: str) -> dict[str, dict[str, object]]:
     them: whole-line comments and trailing commas dropped."""
     with open(path, encoding="utf-8") as f:
         text = re.sub(r"^\s*//[^\n]*(\n|$)", "", f.read(), flags=re.MULTILINE)
-    rows: object = json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
-    if not isinstance(rows, dict):
+    rows = as_json_object(json.loads(re.sub(r",(\s*[}\]])", r"\1", text)))
+    if rows is None:
         raise ValueError("not a JSON object")
-    return {
-        row_id: row
-        for row_id, row in rows.items()
-        if isinstance(row, dict) and row.get("action") in POWER_COMMANDS
-    }
+    power_rows: dict[str, dict[str, object]] = {}
+    for row_id, value in rows.items():
+        row = as_json_object(value)
+        if row is not None and row.get("action") in POWER_COMMANDS:
+            power_rows[row_id] = row
+    return power_rows
+
+
+def as_json_object(value: object) -> dict[str, object] | None:
+    """A decoded JSON object, whose keys are always strings; None for any other value."""
+    return cast(dict[str, object], value) if isinstance(value, dict) else None
 
 
 def render_menu_rows(root: str, power_rows: dict[str, dict[str, object]]) -> str:

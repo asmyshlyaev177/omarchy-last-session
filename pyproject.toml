@@ -12,3 +12,9 @@ python_version = "3.9"
 strict = true
 # Tests are left out: their fixtures are plain dicts from untyped helpers.
 files = ["omarchy_last_session", "bin/omarchy-last-session"]
+
+[tool.pyright]
+# The checker Pylance runs, so CI reports what the editor shows; the same files as mypy.
+pythonVersion = "3.9"
+typeCheckingMode = "strict"
+include = ["omarchy_last_session", "bin/omarchy-last-session"]

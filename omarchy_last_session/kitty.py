@@ -24,13 +24,18 @@ class Process(TypedDict, total=False):
     cmdline: list[str]
 
 
-class Pane(TypedDict, total=False):
+# Every kitty that can rebuild splits (0.36 on) lists these for each pane.
+class _PaneKeys(TypedDict):
     id: int
     cwd: str
     title: str
-    title_overridden: bool
     is_active: bool
     foreground_processes: list[Process]
+
+
+class Pane(_PaneKeys, total=False):
+    # Listed since kitty 0.47, so an older one reports none.
+    title_overridden: bool
 
 
 # A split: the pane or pair on each side, and whether they sit side by side.
@@ -48,14 +53,19 @@ class LayoutState(TypedDict, total=False):
     pairs: SplitNode
 
 
-class Tab(TypedDict, total=False):
+# Every kitty that can rebuild splits lists these for each tab.
+class _TabKeys(TypedDict):
     title: str
-    title_overridden: bool
     is_active: bool
     enabled_layouts: list[str]
     layout: str
     windows: list[Pane]
     layout_state: LayoutState
+
+
+class Tab(_TabKeys, total=False):
+    # Listed since kitty 0.47, so an older one reports none.
+    title_overridden: bool
 
 
 class OSWindow(TypedDict, total=False):
@@ -139,7 +149,10 @@ def render_panes(tab: Tab) -> list[str]:
 def find_head(node: SplitNode) -> int:
     """The pane a subtree grew from: splitting it made the pair."""
     while not isinstance(node, int):
-        node = node["one"] if "one" in node else node["two"]
+        side = node.get("one", node.get("two"))
+        if side is None:
+            raise ValueError("kitty listed a split holding no pane")
+        node = side
     return node
 
 

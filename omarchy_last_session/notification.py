@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Generator
 
 # Not omarchy-action, the default, which shows through do-not-disturb as the
 # answer to something the user just did.
@@ -16,7 +16,7 @@ DISMISS_WAIT = 5
 
 
 @contextlib.contextmanager
-def showing(summary: str, body: str, glyph: str, seconds: float) -> Iterator[None]:
+def showing(summary: str, body: str, glyph: str, seconds: float) -> Generator[None, None, None]:
     """A toast up while the block runs, or for `seconds` should restore be killed
     first. Neither command is waited on at the start, and a missing one is skipped."""
     milliseconds = str(round(seconds * 1000))
