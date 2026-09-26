@@ -8,7 +8,7 @@ import json
 import os
 import shlex
 
-from omarchy_last_session import config, warn
+from omarchy_last_session import config, files, warn
 
 USER_DATA_DIR_FLAG = "--user-data-dir="
 
@@ -35,17 +35,14 @@ def find_user_data_dir(cls, cmd):
 
 def set_exit_type_normal(path):
     try:
-        with open(path, encoding="utf-8") as f:
+        with files.open_regular_file(path) as f:
             prefs = json.load(f)
+            mode = os.fstat(f.fileno()).st_mode & 0o777
         profile = prefs.setdefault("profile", {})
         if profile.get("exit_type") == "Normal":
             return False
         profile["exit_type"] = "Normal"
-        tmp = f"{path}.{os.getpid()}.tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(prefs, f, ensure_ascii=False)
-        os.chmod(tmp, os.stat(path).st_mode & 0o777)
-        os.replace(tmp, path)
+        files.replace_file(path, json.dumps(prefs, ensure_ascii=False), mode)
         return True
     except (OSError, ValueError, AttributeError) as e:
         warn(f"could not mark {path} as cleanly exited: {e}")

@@ -5,10 +5,9 @@ import json
 import os
 import signal
 import stat
-import tempfile
 import time
 
-from omarchy_last_session import config, hypr, kitty, proc, relaunch, warn
+from omarchy_last_session import config, files, hypr, kitty, proc, relaunch, warn
 
 
 def save_session():
@@ -178,23 +177,16 @@ def ensure_private_state_dir():
 def write_private(path, text):
     """Replaces a state file atomically with one of mode 0600."""
     ensure_private_state_dir()
-    fd, tmp = tempfile.mkstemp(dir=config.STATE_DIR, prefix=os.path.basename(path) + ".", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
+    files.replace_file(path, text, 0o600)
 
 
 def open_private(path):
     """Opens a state file for reading, repairing one left readable by others."""
     ensure_private_state_dir()
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
-    if os.fstat(fd).st_mode & 0o077:
-        os.fchmod(fd, 0o600)
-    return os.fdopen(fd)
+    f = files.open_regular_file(path)
+    if os.fstat(f.fileno()).st_mode & 0o077:
+        os.fchmod(f.fileno(), 0o600)
+    return f
 
 
 def quit_session_keeping_apps(timeout=config.GRACEFUL_QUIT_TIMEOUT):
