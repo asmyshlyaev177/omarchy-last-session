@@ -49,19 +49,15 @@ Its own state directory, `~/.local/state/omarchy-last-session`, its config file,
 
 ## Let apps save before the power goes
 
-Omarchy closes every window, one at a time, about two seconds before it powers off. Most apps hold the shutdown themselves for as long as they need. A Chromium-based browser forgets each window that closes while another of its windows is still open, and VS Code remembers only the last window closed. Both keep every window when they are told to quit first, which is what these rows do. Add this to `~/.config/omarchy/extensions/omarchy-menu.jsonc`, creating the file if it does not exist:
+Omarchy closes every window, one at a time, about two seconds before it powers off. Most apps hold the shutdown themselves for as long as they need. A Chromium-based browser forgets each window that closes while another of its windows is still open, and VS Code remembers only the last window closed. Both keep every window when they are told to quit first, which is what the plugin's rows for the Omarchy menu do. Print them with:
 
-```jsonc
-{
-  "system.logout": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-logout"},
-  "system.reboot": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-reboot"},
-  "system.shutdown": {"action":"[[ -x ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session ]] && ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session shutdown; omarchy-system-shutdown"},
-}
+```sh
+~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session menu
 ```
 
-The guard in each row means the plugin being removed changes nothing: the action skips straight to powering off. Leave suspend and hibernate alone, they resume the live session. The menu reloads the file on save.
+Paste what it prints inside the outer braces of `~/.config/omarchy/extensions/omarchy-menu.jsonc`. If the file does not exist, create it with the rows between `{` and `}`. The menu reloads the file on save.
 
-`~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session menu` prints these rows and the one below with the paths of your installation.
+Each power row is a copy of Omarchy's own Logout, Reboot or Shutdown row, with the same icon and label, whose action runs the plugin's `shutdown` first. The guard in each action means the plugin being removed changes nothing: the row skips straight to powering off. Leave suspend and hibernate alone, they resume the live session. The remaining row opens the config file, as described under [Open it from the Omarchy menu](#open-it-from-the-omarchy-menu).
 
 ## What comes back
 
@@ -128,15 +124,7 @@ Lists are comma separated. Quotes around a value are dropped, `#` after a value 
 
 ### Open it from the Omarchy menu
 
-Add this next to the power menu actions in `~/.config/omarchy/extensions/omarchy-menu.jsonc`, and the file is under *Setup › Config › Last Session*, where a search for "session" finds it. The `when` guard hides the row while the plugin directory is gone:
-
-```jsonc
-{
-  "setup.config.last-session": {"icon":"󰁯","label":"Last Session","when":"[[ -d ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session ]]","action":"~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session config"},
-}
-```
-
-The same `config` command from a terminal opens the file in your editor too, and `menu` prints this row and the power menu ones with the paths of your installation.
+The `setup.config.last-session` row that `menu` prints puts the file under *Setup › Config › Last Session*, where a search for "session" finds it. Its `when` guard hides the row while the plugin directory is gone. To add this row without the power rows, paste only its line. The same `config` command from a terminal opens the file in your editor too.
 
 To skip the next restore without disabling the plugin:
 
@@ -168,6 +156,7 @@ journalctl --user -t omarchy-shell -b | grep omarchy-last-session
 | Nothing came back | `session.json`. An empty window list means the desktop was empty for ten seconds before shutdown |
 | A window did not come back | the log names it |
 | A browser window did not come back, and the log says the browser reopened its others | the browser forgot it, because Omarchy closed it before the browser quit. The rows under [Let apps save before the power goes](#let-apps-save-before-the-power-goes) prevent that |
+| The power menu shows `system.shutdown` with no icon, in place of Shutdown, or a power row looks different from Omarchy's own | the rows in your menu file came from an older version of the plugin, or of Omarchy. Print them again with `menu` and replace the old ones, as under [Let apps save before the power goes](#let-apps-save-before-the-power-goes) |
 | Is the plugin running? | `omarchy plugin list --json \| jq '.[] \| select(.id == "io.github.asmyshlyaev177.last-session")'` |
 
 All four files live in `~/.local/state/omarchy-last-session`.

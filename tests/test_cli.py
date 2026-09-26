@@ -2,6 +2,7 @@ import io
 import itertools
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -176,17 +177,72 @@ class ConfigFile(ConfigFileCase):
         self.assertIn("save failed", err.getvalue())
 
 
+OMARCHY = os.environ.get("OMARCHY_PATH") or "/usr/share/omarchy"
+OMARCHY_MENU_MODEL = os.path.join(OMARCHY, "shell/plugins/menu/MenuModel.js")
+# Loads the rows on stdin over Omarchy's own the way its menu does, and prints
+# each row they replace as Omarchy has it and as it ends up.
+MERGE_WITH_OMARCHYS_MENU = """
+const fs = require("fs");
+const model = require(process.argv[1]);
+const own = model.parseMenuJsonc(fs.readFileSync(process.argv[2], "utf8"));
+const rows = model.parseMenuJsonc(fs.readFileSync(0, "utf8"));
+const before = model.mergeMenuSources(own, []).items;
+const after = model.mergeMenuSources(own, rows).items;
+const replaced = rows.filter((row) => before[row.id]).map((row) => [row.id, [before[row.id], after[row.id]]]);
+console.log(JSON.stringify(Object.fromEntries(replaced)));
+"""
+# The power rows and their neighbours in Omarchy 4.0.4's menu, written the way it
+# writes them, with comment lines and trailing commas.
+OMARCHY_MENU = """{
+  // Omarchy menu definition.
+  "system": {"icon":"","label":"System","aliases":["power-menu"]},
+  "system.lock": {"icon":"","label":"Lock","action":"omarchy-system-lock"},
+
+  "system.logout": {"icon":"󰍃","label":"Logout","action":"omarchy-system-logout"},
+  "system.reboot": {"icon":"󰜉","label":"Reboot","action":"omarchy-system-reboot"},
+  "system.shutdown": {"icon":"󰐥","label":"Shutdown","action":"omarchy-system-shutdown"},
+}
+"""
+
+
 class MenuRows(ConfigFileCase):
     """`menu` prints what to paste into the menu file, with the paths of the
     copy that printed it, so a moved plugin never leaves a stale row."""
 
     ROOT = "~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session"
+    LAUNCHER = f"{ROOT}/bin/omarchy-last-session"
+
+    def setUp(self):
+        super().setUp()
+        omarchy = os.path.join(self.config_dir.name, "omarchy")
+        self.omarchy_menu = os.path.join(omarchy, cli.OMARCHY_MENU)
+        self.write_omarchy_menu(OMARCHY_MENU)
+        patcher = mock.patch.dict(os.environ, {"OMARCHY_PATH": omarchy})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_omarchy_menu(self, text):
+        os.makedirs(os.path.dirname(self.omarchy_menu), exist_ok=True)
+        with open(self.omarchy_menu, "w", encoding="utf-8") as f:
+            f.write(text)
 
     def rows(self, root=ROOT):
-        text = cli.render_menu_rows(root)
+        text = cli.render_menu_rows(root, cli.read_power_rows(self.omarchy_menu))
         return json.loads("{" + text.rstrip().rstrip(",") + "}")
 
-    def test_the_rows_are_the_four_the_readme_asks_for(self):
+    def power_action(self, command):
+        return f"[[ -x {self.LAUNCHER} ]] && {self.LAUNCHER} shutdown; {command}"
+
+    def print_menu(self):
+        """(exit code, stdout, stderr) of the `menu` command."""
+        with (
+            mock.patch.object(sys, "stdout", io.StringIO()) as out,
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            code = cli.main(["menu"])
+        return code, out.getvalue(), err.getvalue()
+
+    def test_the_rows_are_the_config_row_and_omarchys_power_rows(self):
         self.assertEqual(
             set(self.rows()),
             {"setup.config.last-session", "system.logout", "system.reboot", "system.shutdown"},
@@ -196,14 +252,40 @@ class MenuRows(ConfigFileCase):
         """The directory outlives any move of the launcher inside it."""
         row = self.rows()["setup.config.last-session"]
         self.assertEqual(row["when"], f"[[ -d {self.ROOT} ]]")
-        self.assertEqual(row["action"], f"{self.ROOT}/bin/omarchy-last-session config")
+        self.assertEqual(row["action"], f"{self.LAUNCHER} config")
         self.assertEqual(row["label"], "Last Session")
 
     def test_the_power_rows_power_off_with_or_without_the_plugin(self):
         for power in ("logout", "reboot", "shutdown"):
             action = self.rows()[f"system.{power}"]["action"]
-            self.assertTrue(action.startswith(f"[[ -x {self.ROOT}/bin/omarchy-last-session ]] && "), action)
-            self.assertTrue(action.endswith(f" shutdown; omarchy-system-{power}"), action)
+            self.assertEqual(action, self.power_action(f"omarchy-system-{power}"))
+
+    def test_a_power_row_is_found_by_its_command_and_keeps_every_field_but_the_action(self):
+        """A row that left out the icon and label showed as "system.shutdown" with no icon."""
+        own = {"icon": "x", "label": "Power off", "description": "Ends the session", "when": "true"}
+        self.write_omarchy_menu(json.dumps({"power.off": {**own, "action": "omarchy-system-shutdown"}}))
+        row = self.rows()["power.off"]
+        self.assertEqual(row.pop("action"), self.power_action("omarchy-system-shutdown"))
+        self.assertEqual(row, own)
+
+    @unittest.skipUnless(
+        shutil.which("node") and os.path.isfile(OMARCHY_MENU_MODEL), "needs node and Omarchy's menu"
+    )
+    def test_omarchys_menu_takes_only_the_action_from_the_rows_that_replace_its_own(self):
+        """Through Omarchy's own menu code and menu, which fill in whatever a row leaves out."""
+        omarchy_menu = os.path.join(OMARCHY, cli.OMARCHY_MENU)
+        done = subprocess.run(
+            ["node", "-e", MERGE_WITH_OMARCHYS_MENU, OMARCHY_MENU_MODEL, omarchy_menu],
+            input="{" + cli.render_menu_rows(self.ROOT, cli.read_power_rows(omarchy_menu)) + "}",
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(done.returncode, 0, done.stderr)
+        replaced = json.loads(done.stdout)
+        self.assertEqual(len(replaced), len(cli.POWER_COMMANDS), replaced)
+        for row_id, (own, merged) in replaced.items():
+            del own["action"], merged["action"]
+            self.assertEqual(merged, own, row_id)
 
     def test_the_guards_hold_when_bash_runs_them(self):
         root = os.path.join(self.config_dir.name, "plugin")
@@ -223,23 +305,35 @@ class MenuRows(ConfigFileCase):
         return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
 
     def test_the_command_prints_the_rows_for_the_copy_it_runs_from(self):
-        with mock.patch.object(sys, "stdout", io.StringIO()) as out:
-            self.assertEqual(cli.main(["menu"]), 0)
-        self.assertEqual(out.getvalue(), cli.render_menu_rows(cli.tilde(cli.PLUGIN_DIR)))
+        code, out, err = self.print_menu()
+        self.assertEqual((code, err), (0, ""))
+        power_rows = cli.read_power_rows(self.omarchy_menu)
+        self.assertEqual(out, cli.render_menu_rows(cli.tilde(cli.PLUGIN_DIR), power_rows))
         self.assertTrue(os.path.isfile(os.path.join(cli.PLUGIN_DIR, "manifest.json")), cli.PLUGIN_DIR)
+
+    def test_without_omarchys_power_rows_the_command_prints_nothing_and_fails(self):
+        """Rows without them would be the config row alone, which reads as success."""
+        broken = {
+            "missing": None,
+            "not JSON": "{",
+            "not an object": "[]",
+            "no power row": '{"system.lock": {"icon":"","label":"Lock","action":"omarchy-system-lock"}}',
+        }
+        for case, text in broken.items():
+            with self.subTest(case):
+                if text is None:
+                    os.unlink(self.omarchy_menu)
+                else:
+                    self.write_omarchy_menu(text)
+                code, out, err = self.print_menu()
+                self.assertEqual((code, out), (1, ""))
+                self.assertIn(self.omarchy_menu, err)
 
     def test_home_is_written_as_a_tilde(self):
         self.assertEqual(cli.tilde(os.path.expanduser("~/.config/x")), "~/.config/x")
         self.assertEqual(cli.tilde(os.path.expanduser("~")), "~")
         self.assertEqual(cli.tilde("/opt/x"), "/opt/x")
         self.assertEqual(cli.tilde(os.path.expanduser("~") + "2/x"), os.path.expanduser("~") + "2/x")
-
-    def test_the_readme_shows_the_rows_the_command_prints(self):
-        """One source: the snippet users copy is the standard install's output."""
-        with open(os.path.join(cli.PLUGIN_DIR, "README.md")) as f:
-            readme = f.read()
-        for line in cli.render_menu_rows(self.ROOT).splitlines():
-            self.assertIn(line, readme)
 
 
 class Usage(unittest.TestCase):
