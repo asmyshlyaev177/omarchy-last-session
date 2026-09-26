@@ -173,6 +173,17 @@ class MonitorCapture(StateDirCase):
     def test_unknown_monitor_id_records_an_empty_name(self):
         saved = self.save_with_monitors([client("code", monitor=9)], [{"id": 0, "name": "eDP-1"}])
         self.assertEqual(saved["monitor_name"], "")
+        self.assertFalse(saved["workspace_shown"])
+
+    def test_a_window_on_the_workspace_its_monitor_shows_is_recorded_as_shown(self):
+        monitors = [{"id": 0, "name": "eDP-1", "activeWorkspace": {"id": 2, "name": "2"}}]
+        saved = self.save_with_monitors([client("code", workspace={"id": 2, "name": "2"})], monitors)
+        self.assertTrue(saved["workspace_shown"])
+
+    def test_a_window_on_a_workspace_behind_the_shown_one_is_recorded_as_not_shown(self):
+        monitors = [{"id": 0, "name": "eDP-1", "activeWorkspace": {"id": 2, "name": "2"}}]
+        saved = self.save_with_monitors([client("code", workspace={"id": 4, "name": "4"})], monitors)
+        self.assertFalse(saved["workspace_shown"])
 
 
 class PrivateState(StateDirCase):

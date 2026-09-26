@@ -62,6 +62,68 @@ class WorkspaceMonitorPlacement(unittest.TestCase):
         )
 
 
+class ShownWorkspaces(unittest.TestCase):
+    """A workspace moved onto a monitor is not the one it shows, and the monitor it
+    left shows a new empty workspace. Every login gave eDP-1 workspace 1 and DP-9
+    workspace 2; saved the other way round, the laptop screen came back empty."""
+
+    def emit(self, windows, monitors):
+        with (
+            mock.patch.object(hypr, "query", return_value=monitors),
+            mock.patch.object(hypr, "dispatch") as dispatched,
+        ):
+            switched = layout.show_saved_workspaces(windows)
+        return switched, [c.args[0] for c in dispatched.call_args_list]
+
+    @staticmethod
+    def monitor(name, shows, focused=False):
+        number = int(shows) if shows.isdigit() else -1
+        return {"name": name, "activeWorkspace": {"id": number, "name": shows}, "focused": focused}
+
+    @staticmethod
+    def shown(ws, monitor_name):
+        return dict(saved_window("x", ws=ws, monitor_name=monitor_name), workspace_shown=True)
+
+    def test_a_monitor_left_on_an_empty_workspace_is_switched_to_the_one_it_showed(self):
+        wins = [self.shown(1, "DP-9"), self.shown(2, "eDP-1")]
+        monitors = [self.monitor("eDP-1", "4", focused=True), self.monitor("DP-9", "1")]
+        self.assertEqual(self.emit(wins, monitors), (1, ["hl.dsp.focus({ workspace = '2' })"]))
+
+    def test_a_workspace_that_was_behind_the_shown_one_stays_behind(self):
+        behind = dict(saved_window("x", ws=4, monitor_name="DP-9"), workspace_shown=False)
+        monitors = [self.monitor("DP-9", "2", focused=True)]
+        self.assertEqual(self.emit([behind, self.shown(2, "DP-9")], monitors), (0, []))
+
+    def test_the_focused_monitor_is_switched_last_so_the_focus_stays_on_it(self):
+        wins = [self.shown(2, "eDP-1"), self.shown(1, "DP-9")]
+        monitors = [self.monitor("eDP-1", "5", focused=True), self.monitor("DP-9", "6")]
+        self.assertEqual(
+            self.emit(wins, monitors),
+            (2, ["hl.dsp.focus({ workspace = '1' })", "hl.dsp.focus({ workspace = '2' })"]),
+        )
+
+    def test_the_focus_goes_back_to_a_focused_monitor_that_needed_no_switch(self):
+        wins = [self.shown(2, "eDP-1"), self.shown(1, "DP-9")]
+        monitors = [self.monitor("eDP-1", "2", focused=True), self.monitor("DP-9", "6")]
+        self.assertEqual(
+            self.emit(wins, monitors),
+            (1, ["hl.dsp.focus({ workspace = '1' })", "hl.dsp.focus({ monitor = 'eDP-1' })"]),
+        )
+
+    def test_a_named_workspace_is_shown_by_its_name(self):
+        home = dict(self.shown(0, "DP-9"), workspace={"id": -1337, "name": "Home"})
+        monitors = [self.monitor("DP-9", "5", focused=True)]
+        self.assertEqual(self.emit([home], monitors), (1, ["hl.dsp.focus({ workspace = 'name:Home' })"]))
+
+    def test_a_monitor_that_is_gone_is_skipped(self):
+        monitors = [self.monitor("eDP-1", "1", focused=True)]
+        self.assertEqual(self.emit([self.shown(2, "DP-9")], monitors), (0, []))
+
+    def test_a_snapshot_saved_before_shown_workspaces_were_recorded_changes_nothing(self):
+        monitors = [self.monitor("eDP-1", "1", focused=True)]
+        self.assertEqual(self.emit([saved_window("x", ws=2, monitor_name="eDP-1")], monitors), (0, []))
+
+
 class WorkspaceNaming(unittest.TestCase):
     """A renamed numbered workspace is restored by its number, which Hyprland
     recreates unnamed, so its saved name is put back afterwards."""
@@ -324,6 +386,18 @@ class HeldWorkspacesInRestore(RestoreHarness):
         self.assertIn("exec_cmd", emitted[1])
         self.assertIn("workspace.move", emitted[-2])
         self.assertEqual(emitted[-1], "release")
+
+    def test_a_monitor_is_switched_to_its_saved_workspace_after_the_moves(self):
+        self.hold_and_release_into_timeline()
+        monitors = [
+            {"id": 0, "name": "DP-2", "activeWorkspace": {"id": 7, "name": "7"}, "focused": True},
+            {"id": 1, "name": "eDP-1", "activeWorkspace": {"id": 1, "name": "1"}},
+        ]
+        self.patch(hypr, "query", mock.Mock(side_effect=lambda cmd: monitors if cmd == "monitors" else []))
+        self.write_session([dict(saved_window("code", ws=2, monitor_name="DP-2"), workspace_shown=True)])
+        emitted = self.run_restore([{}, {"0xa": live_window("code", ws=2)}])
+        self.assertIn("workspace.move", emitted[-3])
+        self.assertEqual(emitted[-2:], ["hl.dsp.focus({ workspace = '2' })", "release"])
 
     def test_workspaces_are_released_when_restore_fails_part_way(self):
         self.hold_and_release_into_timeline()

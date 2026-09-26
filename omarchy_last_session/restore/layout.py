@@ -1,5 +1,5 @@
 """Workspaces held open through the pass, then after the sweep: groups rebuilt,
-workspace names put back, workspaces moved onto their monitors."""
+workspace names put back, workspaces moved onto their monitors and shown there."""
 
 from omarchy_last_session import hypr
 
@@ -109,3 +109,23 @@ def place_workspaces_on_monitors(windows):
         target = f"workspace = {hypr.quote_lua(selector)}, monitor = {hypr.quote_lua(monitor)}"
         hypr.dispatch(f"hl.dsp.workspace.move({{ {target} }})")
     return len(wanted)
+
+
+def show_saved_workspaces(windows):
+    """A workspace moved onto a monitor is not the one it shows, and the monitor it
+    left falls back to a new empty workspace, so each monitor is switched back to
+    the workspace it showed when saved."""
+    monitors = hypr.query("monitors")
+    shown = {m.get("name"): hypr.format_workspace_selector(m.get("activeWorkspace", {})) for m in monitors}
+    focused = next((m.get("name") for m in monitors if m.get("focused")), None)
+    wanted = {}
+    for win in windows:
+        if win.get("workspace_shown") and win.get("monitor_name") in shown:
+            wanted.setdefault(win["monitor_name"], hypr.format_workspace_selector(win["workspace"]))
+    # Focusing a workspace focuses its monitor too, so the focused monitor goes last.
+    switches = sorted((m for m in wanted if shown[m] != wanted[m]), key=lambda m: m == focused)
+    for monitor in switches:
+        hypr.dispatch(f"hl.dsp.focus({{ workspace = {hypr.quote_lua(wanted[monitor])} }})")
+    if switches and focused is not None and switches[-1] != focused:
+        hypr.dispatch(f"hl.dsp.focus({{ monitor = {hypr.quote_lua(focused)} }})")
+    return len(switches)

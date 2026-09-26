@@ -1018,6 +1018,34 @@ class LiveRestore(unittest.TestCase):
         self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
         self.assertEqual((c.shown_workspaces(), c.window_places()), before, c.requests())
 
+    def test_two_monitors_that_traded_workspaces_each_show_their_own_again(self):
+        """Every login gives eDP-1 workspace 1 and DP-9 workspace 2. Saved the other way
+        round, moving 1 onto DP-9 left eDP-1 on a new empty workspace, and 2 arrived
+        behind it: the laptop screen came back with no windows (2026-09-26)."""
+        c = self.comp
+        c.boot(DOCKED)
+        for number in (1, 2, 3):
+            c.dispatch(f"hl.dsp.focus({{ workspace = {number} }})")
+            c.open_window(f"foot --app-id=shown{number}")
+        c.dispatch("hl.dsp.workspace.move({ workspace = '1', monitor = 'DP-9' })")
+        c.dispatch("hl.dsp.workspace.move({ workspace = '2', monitor = 'eDP-1' })")
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        before = (c.shown_workspaces(), c.window_places())
+        self.assertEqual(
+            before,
+            (
+                {"eDP-1": "2", "DP-9": "1", "HDMI-A-1": "3"},
+                {"shown1": ("1", "DP-9"), "shown2": ("2", "eDP-1"), "shown3": ("3", "HDMI-A-1")},
+            ),
+        )
+        self.snapshot("shutdown", "state")
+
+        c.shutdown()
+        c.boot(DOCKED)
+        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+        self.assertEqual((c.shown_workspaces(), c.window_places()), before, c.requests())
+
     def test_a_renamed_workspace_comes_back_under_its_number(self):
         """A numbered workspace the user renamed keeps its number: the bar
         lists it by that. Restored as name:Home it would be a new named

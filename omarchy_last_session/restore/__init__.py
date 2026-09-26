@@ -1,4 +1,5 @@
-"""The restore pass: launch, sweep, group, then name workspaces and place them on monitors."""
+"""The restore pass: launch, sweep, group, then name workspaces, place them on monitors
+and show on each monitor the workspace it showed."""
 
 import os
 
@@ -39,6 +40,7 @@ def restore_windows(windows, already_open):
     layout.build_groups(placed)
     layout.name_workspaces(windows)
     layout.place_workspaces_on_monitors(windows)
+    layout.show_saved_workspaces(windows)
 
 
 def show_toast(windows):

@@ -167,10 +167,11 @@ def get_layout():
 
 
 def get_monitor_layout():
-    """Monitor id -> (name, top-left corner). Names survive a reboot, ids do not."""
+    """Monitor id -> (name, top-left corner, id of the workspace it shows). Names
+    survive a reboot, ids do not."""
     try:
         return {
-            m["id"]: (m["name"], [m.get("x", 0), m.get("y", 0)])
+            m["id"]: (m["name"], [m.get("x", 0), m.get("y", 0)], m.get("activeWorkspace", {}).get("id"))
             for m in query("monitors")
             if "id" in m and "name" in m
         }
@@ -181,6 +182,6 @@ def get_monitor_layout():
 def get_monitor_origins():
     """Top-left corner of every monitor, keyed by name and by id."""
     origins = {}
-    for monitor_id, (name, corner) in get_monitor_layout().items():
+    for monitor_id, (name, corner, _) in get_monitor_layout().items():
         origins[name] = origins[monitor_id] = tuple(corner)
     return origins

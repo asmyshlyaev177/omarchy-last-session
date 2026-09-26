@@ -101,7 +101,7 @@ def write_kitty_sessions(clients):
 
 
 def build_window_entry(client, cmd, spawn, group, layout):
-    monitor_name, monitor_at = layout.get(client.get("monitor"), ("", [0, 0]))
+    monitor_name, monitor_at, shown_workspace = layout.get(client.get("monitor"), ("", [0, 0], None))
     return {
         "class": client["class"],
         "title": client.get("title", ""),
@@ -114,6 +114,7 @@ def build_window_entry(client, cmd, spawn, group, layout):
         "monitor": client.get("monitor", 0),
         "monitor_name": monitor_name,
         "monitor_at": monitor_at,
+        "workspace_shown": client["workspace"].get("id") == shown_workspace,
         "cmd": cmd,
         "spawn": spawn,
         "group": group,
