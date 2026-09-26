@@ -18,7 +18,7 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 | `omarchy_last_session/notification.py` | the toast restore shows while it runs, through Omarchy's `omarchy-notification-send` and `omarchy-notification-dismiss` |
 | `omarchy_last_session/cli.py` | the six commands `save`, `restore`, `shutdown`, `daemon`, `config`, `menu` |
 | `tests/` | unit tests, one file per module (`test_restore_<module>.py` for `restore/<module>.py`), fixtures in `tests/helpers.py` |
-| `tests/integration/` | live suite against a real Hyprland in a container |
+| `tests/integration/` | live suite against a real Hyprland in a container, or in a VM inside it with `OLS_VM=1` (`vm-run.sh`) |
 | `docs/preview.html` | source of the marketplace `preview.png` |
 
 ## Runtime facts
@@ -65,14 +65,20 @@ uvx ruff check . && uvx ruff format --check .                          # config 
 uvx mypy==1.19.1                                                       # strict, config in pyproject.toml
 uvx pyright==1.1.414                                                   # strict, config in pyproject.toml
 omarchy plugin validate .
-OLS_CONTAINER=podman tests/integration/run.sh                          # live suite, about 75 s
+OLS_CONTAINER=podman tests/integration/run.sh                          # live suite, about 140 s
+OLS_VM=1 tests/integration/run.sh                                      # the same in a VM, as CI runs it, about 200 s
 ```
 
-CI runs the unit suite on Python 3.9 and 3.13, the two ruff checks, mypy and Pyright. The live job only runs when the repository variable `OLS_LIVE_RUNNER` names a self-hosted runner with a DRM render node. Keep the code 3.9 compatible, so no `match`, no `X | Y` unions and no `zip(strict=...)`.
+CI runs the unit suite on Python 3.9 and 3.13, the two ruff checks, mypy, Pyright, and the live suite with `OLS_VM=1`. Keep the code 3.9 compatible, so no `match`, no `X | Y` unions and no `zip(strict=...)`.
 
 Every module starts with `from __future__ import annotations`, so an annotation is never evaluated and `X | None` is fine in one. A type alias or a functional `TypedDict` runs at import, so it spells unions with `Optional` and `Union`. mypy and Pyright check the package strictly and leave the tests out: their fixtures are plain dicts from untyped helpers. Pyright is what Pylance runs, so CI reports what the editor shows. Each catches mistakes the other misses: mypy reports a function returning `Any`, and Pyright reports a TypedDict key read with `[]` that the type says may be absent. The one `Any` is `config.Settings`, whose values `parse_value` checks against each default's type.
 
 `run.sh` bind-mounts the repo live, so run it from a frozen copy while the tree is being edited (`git archive HEAD | tar -x -C <scratch dir>`, plus an `rsync` of uncommitted work).
+
+- GitHub's hosted runners have KVM but no render node, only a display-only `hyperv_drm` card. So with `OLS_VM=1` the container boots `/boot/vmlinuz-linux` with `vng` (virtme-ng), which shares the container's files with the VM over virtiofs.
+- `vm-run.sh` loads vkms in the VM and passes its card as `OLS_DRM_CARD`. Hyprland then drives the card itself (`AQ_DRM_DEVICES`, libseat's `noop` backend) instead of nesting in labwc, and Mesa renders with llvmpipe.
+- Over 9p (`vng --force-9p`) the suite took 333 s instead of 185 s over virtiofs (2026-09-26), so keep virtiofs.
+- CI has no Omarchy, so there the suite runs under plain Hyprland rules, without the Omarchy defaults `run.sh` mounts in on this desktop.
 
 ## Writing
 

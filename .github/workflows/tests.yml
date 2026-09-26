@@ -1,8 +1,15 @@
 name: tests
 
 on:
+  # Other branches get their run from the pull request; a push run too would test the same commit twice.
   push:
+    branches: [master]
   pull_request:
+
+# Per ref: a new push cancels the unfinished run of the same pull request or of master, not of another one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   unit:
@@ -40,12 +47,16 @@ jobs:
         with:
           args: format --check .
 
-  # Hyprland's backend opens a DRM device to allocate buffers, and no hosted
-  # runner can provide one. Set OLS_LIVE_RUNNER to the label of a self-hosted
-  # runner with a real GPU and the live suite runs there.
+  # Hyprland's backend opens a DRM device to allocate buffers, and hosted
+  # runners have no render node. They have KVM, so run.sh boots the image's own
+  # kernel in a VM, where vkms makes a display-only card and Mesa renders with llvmpipe.
   live:
-    if: vars.OLS_LIVE_RUNNER != ''
-    runs-on: ${{ vars.OLS_LIVE_RUNNER }}
+    runs-on: ubuntu-latest
+    # A VM that hangs would otherwise hold the runner for the six-hour default.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - run: tests/integration/run.sh
+        env:
+          OLS_CONTAINER: docker
+          OLS_VM: '1'

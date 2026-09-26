@@ -4,7 +4,8 @@ the plugin driven through its command line. Nothing is mocked.
 Run them with tests/integration/run.sh. They need OLS_LIVE_TESTS=1 plus
 Hyprland, labwc and foot on PATH, so discovery from the repository root skips
 them. Hyprland's backend needs a DRM device, so it runs nested in a headless
-labwc on the host's render node.
+labwc on the host's render node, or drives the display-only card OLS_DRM_CARD
+names, which vm-run.sh sets up in run.sh's VM.
 """
 
 import functools
@@ -28,6 +29,7 @@ import zlib
 HERE = os.path.dirname(os.path.abspath(__file__))
 SCRIPT = os.path.join(os.path.dirname(os.path.dirname(HERE)), "bin", "omarchy-last-session")
 CONFIG = os.path.join(HERE, "hyprland.lua")
+DRM_CARD = os.environ.get("OLS_DRM_CARD")
 LIVE = os.environ.get("OLS_LIVE_TESTS") == "1" and all(
     shutil.which(binary) for binary in ("Hyprland", "labwc", "foot")
 )
@@ -131,8 +133,8 @@ def read_devtools_answer(answers, number, pending):
 
 
 class Compositor:
-    """labwc as the parent, Hyprland nested in it. boot() can follow
-    shutdown() for the next login; labwc stays up throughout."""
+    """Hyprland nested in labwc, or on DRM_CARD by itself. boot() can follow
+    shutdown() for the next login; labwc, if used, stays up throughout."""
 
     def __init__(self, workdir):
         self.home = os.path.join(workdir, "home")
@@ -192,13 +194,21 @@ class Compositor:
             log=lambda: self.log_tail("labwc"),
         )
 
-    def boot(self, monitors):
+    def _open_backend(self):
+        """Hyprland's environment for what it draws on: DRM_CARD, or labwc, started on first use."""
+        if DRM_CARD:
+            # No seat manager runs in the VM; libseat's noop backend opens the card directly.
+            return {"AQ_DRM_DEVICES": DRM_CARD, "LIBSEAT_BACKEND": "noop"}
         if self.parent is None:
             self._start_parent()
+        return {"WAYLAND_DISPLAY": "wayland-0"}
+
+    def boot(self, monitors):
+        backend = self._open_backend()
         shutil.rmtree(os.path.join(self.runtime_dir, "hypr"), ignore_errors=True)
         env = dict(
             self._base_env(),
-            WAYLAND_DISPLAY="wayland-0",
+            **backend,
             HYPRLAND_NO_SD_NOTIFY="1",
             HYPRLAND_NO_SD_VARS="1",
             HYPRLAND_NO_CRASHREPORTER="1",
@@ -218,6 +228,10 @@ class Compositor:
             "hyprctl to answer",
             log=lambda: self.log_tail("hyprland"),
         )
+        # A client the harness starts itself, such as the Chromium that installs a web app,
+        # connects to Hyprland as a desktop's clients do. On DRM_CARD there is no other display.
+        (instance,) = self.json("instances")
+        self.env["WAYLAND_DISPLAY"] = instance["wl_socket"]
         for name in monitors:
             self.hyprctl("output", "create", "headless", name)
         wait_for(
@@ -927,6 +941,8 @@ class LiveRestore(unittest.TestCase):
         self.write_kitty_config()
         c.dispatch("hl.dsp.focus({ workspace = 1 })")
         pid = c.open_window("kitty")["pid"]
+        # Its window maps before it listens on its socket.
+        wait_for(lambda: c.kitten(pid, "ls", check=False), "kitty to listen")
         c.kitten(pid, "launch", "--type=window", "--location=vsplit", "--cwd=/usr")
         c.kitten(pid, "launch", "--type=window", "--location=hsplit", "--cwd=/var")
         c.kitten(pid, "launch", "--type=tab", "--tab-title=logs", "--cwd=/etc")
