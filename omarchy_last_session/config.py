@@ -1,10 +1,14 @@
 """Knobs. The ones a user may change come from the config file, which ships
 every default in SETTINGS and TABLES; everything else is a constant here."""
 
+from __future__ import annotations
+
 import configparser
 import math
 import os
 import re
+from collections.abc import Callable
+from typing import Any, Optional
 
 from omarchy_last_session import warn
 
@@ -28,9 +32,15 @@ FOOTER = """\
 # restore their own session with no help.
 """
 
+# Setting name -> value. Each value is checked against its default's type when the
+# file is read (parse_value), so one table holds lists, strings and numbers alike.
+Settings = dict[str, Any]
+# Binary, the flag that sets the working directory, the flag that runs a program.
+Terminal = tuple[str, str, Optional[str]]
+
 # [general]: key -> (default, the comment written above it in the file).
 # A list in the file replaces the default list.
-SETTINGS = {
+SETTINGS: dict[str, tuple[object, str]] = {
     "exclude": (
         [],
         "Window classes never saved or restored. The shell's and the compositor's own\n"
@@ -98,7 +108,7 @@ MINIMUMS = {"save_interval": 1}
 MAX_SECONDS = 10**9
 
 
-def unquote(text):
+def unquote(text: str) -> str:
     """Without the pair of quotes users write around a value, which INI has no use for."""
     text = text.strip()
     if len(text) >= 2 and text[0] == text[-1] and text[0] in "\"'":
@@ -106,7 +116,7 @@ def unquote(text):
     return text
 
 
-def parse_terminal(text):
+def parse_terminal(text: str) -> Terminal | None:
     """(binary, cwd flag, exec flag or None) from 'binary, flag[, flag]'; None otherwise."""
     parts = [unquote(part) for part in text.split(",")]
     while parts and not parts[-1]:
@@ -116,14 +126,14 @@ def parse_terminal(text):
     return (parts[0], parts[1], parts[2] if len(parts) == 3 else None)
 
 
-def parse_profile_dir(text):
+def parse_profile_dir(text: str) -> str | None:
     """Under ~/.config unless absolute; ~ is expanded so it does not end up under it."""
     return os.path.expanduser(unquote(text)) or None
 
 
 # Sections holding a table: name -> (default rows, comment, parser of one row's value).
 # A section in the file replaces the whole table.
-TABLES = {
+TABLES: dict[str, tuple[dict[str, Any], str, Callable[[str], object]]] = {
     "terminals": (
         {
             "kitty": ("kitty", "-d", None),
@@ -152,7 +162,7 @@ TABLES = {
         parse_profile_dir,
     ),
 }
-DEFAULTS = {key: default for key, (default, _) in SETTINGS.items()}
+DEFAULTS: Settings = {key: default for key, (default, _) in SETTINGS.items()}
 DEFAULTS.update({name: rows for name, (rows, _, _) in TABLES.items()})
 
 # hyprland-dialog is the compositor's own, such as its "not responding" prompt.
@@ -184,11 +194,17 @@ SPAWN_STAGGER = 0.3
 BROWSER_START_TIMEOUT = 15
 
 
-def load_file():
+class CaseSensitiveParser(configparser.ConfigParser):
+    """Keys as written: window classes are case-sensitive, as in Alacritty and Chromium."""
+
+    def optionxform(self, optionstr: str) -> str:
+        return optionstr
+
+
+def load_file() -> Settings | None:
     """The config file over DEFAULTS; None for a file that cannot be read at all.
     A key that is not a setting or a value that cannot be one is reported and skipped."""
-    parser = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
-    parser.optionxform = str  # window classes are case-sensitive: Alacritty, Chromium
+    parser = CaseSensitiveParser(interpolation=None, inline_comment_prefixes=("#", ";"))
     try:
         # utf-8-sig: an editor's byte order mark would otherwise hide the first line.
         with open(CONFIG_FILE, encoding="utf-8-sig") as f:
@@ -210,7 +226,7 @@ def load_file():
     return settings
 
 
-def read_settings(items, settings):
+def read_settings(items: list[tuple[str, str]], settings: Settings) -> None:
     for written, text in items:
         key = written.lower()
         if key not in SETTINGS:
@@ -226,9 +242,9 @@ def read_settings(items, settings):
             settings[key] = value
 
 
-def read_table(section, items):
+def read_table(section: str, items: list[tuple[str, str]]) -> dict[str, object]:
     _, _, parse = TABLES[section]
-    rows = {}
+    rows: dict[str, object] = {}
     for key, text in items:
         value = parse(text)
         if value is None:
@@ -238,7 +254,7 @@ def read_table(section, items):
     return rows
 
 
-def parse_value(key, text):
+def parse_value(key: str, text: str) -> list[str] | str | float | None:
     """What the text stands for, in the default's type; None for a number it cannot be."""
     default = DEFAULTS[key]
     if isinstance(default, list):
@@ -248,7 +264,7 @@ def parse_value(key, text):
     return parse_number(text, MINIMUMS.get(key, 0))
 
 
-def parse_number(text, lowest):
+def parse_number(text: str, lowest: float) -> float | None:
     try:
         number = float(text)
     except ValueError:
@@ -258,7 +274,30 @@ def parse_number(text, lowest):
     return int(number) if number.is_integer() else number
 
 
-def apply(settings):
+# Set by apply() from the settings in force, which runs at import, before any other module reads them.
+STATE_DIR: str
+SESSION_FILE: str
+DISABLE_FLAG: str
+LAST_SHUTDOWN_FILE: str
+LAST_RESTORE_FILE: str
+KITTY_SESSION_FILE: str
+KITTY_SESSION_GLOB: str
+EXCLUDE_CLASSES: frozenset[str]
+TUI_PROGRAMS: frozenset[str]
+SHELLS: frozenset[str]
+TERMINALS: dict[str, Terminal]
+CHROMIUM_BROWSERS: dict[str, str]
+RESTORE_FLAGS: dict[str, str]
+SESSION_KEEPING_CLASSES: frozenset[str]
+SINGLE_INSTANCE_CLASSES: frozenset[str]
+SETTLE_DELAY: float
+SAVE_INTERVAL: float
+SWEEP_TIMEOUT: float
+TITLE_SETTLE: float
+MAX_PREEXISTING_WINDOWS: float
+
+
+def apply(settings: Settings) -> None:
     """Sets the knobs the other modules read."""
     global STATE_DIR, SESSION_FILE, DISABLE_FLAG, LAST_SHUTDOWN_FILE, LAST_RESTORE_FILE
     global KITTY_SESSION_FILE, KITTY_SESSION_GLOB, EXCLUDE_CLASSES, TUI_PROGRAMS, SHELLS
@@ -291,11 +330,11 @@ def apply(settings):
     MAX_PREEXISTING_WINDOWS = settings["max_preexisting_windows"]
 
 
-_loaded_stamp = None
-_in_force = dict(DEFAULTS)
+_loaded_stamp: tuple[int, int] | None = None
+_in_force: Settings = dict(DEFAULTS)
 
 
-def get_file_stamp():
+def get_file_stamp() -> tuple[int, int] | None:
     """What has to differ for the file to count as edited; None without a file."""
     try:
         st = os.stat(CONFIG_FILE)
@@ -304,7 +343,7 @@ def get_file_stamp():
         return None
 
 
-def reload():
+def reload() -> None:
     """A file that cannot be read leaves what was in force, so a half-saved
     edit does not drop the daemon to the defaults."""
     global _loaded_stamp, _in_force
@@ -315,7 +354,7 @@ def reload():
     apply(_in_force)
 
 
-def reload_if_changed():
+def reload_if_changed() -> bool:
     """True when the file was edited since it was last read, in which case it
     has been read again: the daemon follows an edit without a restart."""
     if get_file_stamp() == _loaded_stamp:
@@ -324,7 +363,7 @@ def reload_if_changed():
     return True
 
 
-def render_template():
+def render_template() -> str:
     """The file as the plugin writes it: every default, with a comment on each."""
     lines = [HEADER, f"[{SECTION}]"]
     for key, (default, doc) in SETTINGS.items():
@@ -335,24 +374,24 @@ def render_template():
     return "\n".join(lines + ["", FOOTER])
 
 
-def render_comment(doc):
+def render_comment(doc: str) -> list[str]:
     return ["# " + line for line in doc.split("\n")]
 
 
-def render_entry(key, value):
+def render_entry(key: str, value: object) -> str:
     if isinstance(value, (list, tuple)):
         value = ", ".join(part for part in value if part)
     return f"{key} = {value}".rstrip()
 
 
-def write_defaults():
+def write_defaults() -> None:
     """Refuses to touch an existing file."""
     os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
     with open(CONFIG_FILE, "x", encoding="utf-8") as f:
         f.write(render_template())
 
 
-def ensure_file():
+def ensure_file() -> None:
     """Written once, the first time the plugin runs, so there is a commented
     file to open from the menu."""
     global _loaded_stamp

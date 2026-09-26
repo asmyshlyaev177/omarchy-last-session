@@ -17,6 +17,16 @@ jobs:
           python-version: ${{ matrix.python }}
       - run: python3 -m unittest discover -s tests -v
 
+  types:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - run: python3 -m pip install mypy==1.19.1
+      - run: python3 -m mypy
+
   lint:
     runs-on: ubuntu-latest
     steps:

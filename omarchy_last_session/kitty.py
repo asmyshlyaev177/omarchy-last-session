@@ -1,10 +1,14 @@
 """A kitty instance's tabs and splits, rendered as a session file. Needs the
 instance's remote control on; without it there is nothing to read."""
 
+from __future__ import annotations
+
 import json
 import os
 import shlex
 import subprocess
+from collections.abc import Iterator
+from typing import TypedDict, Union
 
 from omarchy_last_session import config, proc, relaunch
 
@@ -15,7 +19,50 @@ REMOTE_CONTROL = ["kitten", "@"]
 PANE_VAR = "ols_pane"
 
 
-def build_session_text(pid):
+# What `kitten @ ls` reports, as far as a session file needs it.
+class Process(TypedDict, total=False):
+    cmdline: list[str]
+
+
+class Pane(TypedDict, total=False):
+    id: int
+    cwd: str
+    title: str
+    title_overridden: bool
+    is_active: bool
+    foreground_processes: list[Process]
+
+
+# A split: the pane or pair on each side, and whether they sit side by side.
+class Pair(TypedDict, total=False):
+    one: SplitNode
+    two: SplitNode
+    horizontal: bool
+
+
+# A pane id, or a pair of subtrees.
+SplitNode = Union[int, Pair]
+
+
+class LayoutState(TypedDict, total=False):
+    pairs: SplitNode
+
+
+class Tab(TypedDict, total=False):
+    title: str
+    title_overridden: bool
+    is_active: bool
+    enabled_layouts: list[str]
+    layout: str
+    windows: list[Pane]
+    layout_state: LayoutState
+
+
+class OSWindow(TypedDict, total=False):
+    tabs: list[Tab]
+
+
+def build_session_text(pid: int) -> str | None:
     """A session file replaying this instance, or None when it does not answer."""
     address = find_listen_address(pid)
     if address is None:
@@ -24,7 +71,7 @@ def build_session_text(pid):
     return render_session(layout) if layout else None
 
 
-def find_listen_address(pid):
+def find_listen_address(pid: int) -> str | None:
     """Kitty exports its socket only to the processes it starts, so the address
     is read from a pane's shell rather than guessed."""
     for child in proc.list_children(pid):
@@ -34,19 +81,22 @@ def find_listen_address(pid):
     return None
 
 
-def read_layout(address):
+def read_layout(address: str) -> list[OSWindow] | None:
     """Every OS window, tab and pane of the instance, as kitty reports them."""
     try:
         done = subprocess.run(
             REMOTE_CONTROL + ["--to", address, "ls"], capture_output=True, text=True, timeout=5
         )
-        return json.loads(done.stdout) if done.returncode == 0 else None
+        if done.returncode != 0:
+            return None
+        layout: list[OSWindow] = json.loads(done.stdout)
+        return layout
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
 
 
-def render_session(os_windows):
-    lines = []
+def render_session(os_windows: list[OSWindow]) -> str:
+    lines: list[str] = []
     for index, os_window in enumerate(os_windows):
         if index:
             lines.append("new_os_window")
@@ -54,15 +104,15 @@ def render_session(os_windows):
     return "\n".join(lines) + "\n"
 
 
-def render_os_window(os_window):
+def render_os_window(os_window: OSWindow) -> list[str]:
     tabs = os_window.get("tabs") or []
-    lines = []
+    lines: list[str] = []
     for tab in tabs:
         lines += render_tab(tab)
     return lines + render_active_tab(tabs)
 
 
-def render_tab(tab):
+def render_tab(tab: Tab) -> list[str]:
     """`new_tab` reads the rest of its line as the title, so the title is
     written plain rather than quoted."""
     lines = ["new_tab " + tab["title"] if is_named(tab) else "new_tab"]
@@ -72,7 +122,7 @@ def render_tab(tab):
     return lines + render_panes(tab) + render_active_pane(tab)
 
 
-def render_panes(tab):
+def render_panes(tab: Tab) -> list[str]:
     """Panes in an order that rebuilds the tab. The splits layout has a tree
     saying which pane to split; every other layout arranges its own."""
     by_id = {window["id"]: window for window in tab.get("windows") or []}
@@ -86,28 +136,28 @@ def render_panes(tab):
     return lines
 
 
-def find_head(node):
+def find_head(node: SplitNode) -> int:
     """The pane a subtree grew from: splitting it made the pair."""
     while not isinstance(node, int):
         node = node["one"] if "one" in node else node["two"]
     return node
 
 
-def iter_splits(node):
+def iter_splits(node: SplitNode) -> Iterator[tuple[int, bool, int]]:
     """(pane to split, side by side, pane the split made) for every pair, a
     parent before its children, so each pane exists before it is split. Kitty
     reports a tab that was never split as a pair holding one pane."""
     if isinstance(node, int):
         return
-    sides = [side for side in ("one", "two") if side in node]
-    if len(sides) == 2:
-        yield find_head(node["one"]), node.get("horizontal", True), find_head(node["two"])
-    for side in sides:
-        for split in iter_splits(node[side]):
-            yield split
+    one, two = node.get("one"), node.get("two")
+    if one is not None and two is not None:
+        yield find_head(one), node.get("horizontal", True), find_head(two)
+    for side in (one, two):
+        if side is not None:
+            yield from iter_splits(side)
 
 
-def render_launch(window, location):
+def render_launch(window: Pane, location: str | None) -> str:
     argv = ["launch"]
     if location:
         argv.append("--location=" + location)
@@ -119,7 +169,7 @@ def render_launch(window, location):
     return shlex.join(argv + build_program_argv(window))
 
 
-def render_active_pane(tab):
+def render_active_pane(tab: Tab) -> list[str]:
     """Asked for while this tab is the one being built: it reaches no other."""
     for window in tab.get("windows") or []:
         if window.get("is_active"):
@@ -127,7 +177,7 @@ def render_active_pane(tab):
     return []
 
 
-def render_active_tab(tabs):
+def render_active_tab(tabs: list[Tab]) -> list[str]:
     """Kitty starts on the first tab, so only another one is asked for."""
     for index, tab in enumerate(tabs):
         if tab.get("is_active") and index:
@@ -135,7 +185,7 @@ def render_active_tab(tabs):
     return []
 
 
-def build_program_argv(window):
+def build_program_argv(window: Pane) -> list[str]:
     """The TUI a pane is running. A pane at a prompt is left to kitty, which
     opens the user's shell in its directory."""
     for process in window.get("foreground_processes") or []:
@@ -145,12 +195,12 @@ def build_program_argv(window):
     return []
 
 
-def is_named(item):
+def is_named(item: Tab | Pane) -> bool:
     """True for a tab or pane the user titled, not one the shell titled."""
     return bool(item.get("title_overridden")) and is_one_line(item.get("title") or "")
 
 
-def is_one_line(text):
+def is_one_line(text: str) -> bool:
     """Kitty reads a session file one directive per line, and a pane's title is
     whatever ran in it printed, so text spanning lines is dropped."""
     return bool(text) and "\n" not in text and "\r" not in text

@@ -3,17 +3,20 @@ power menu killed has recorded one. Marking its profiles as cleanly exited
 before the relaunch lets --restore-last-session work; the session file itself
 survives the kill."""
 
+from __future__ import annotations
+
 import glob
 import json
 import os
 import shlex
+from typing import Any
 
 from omarchy_last_session import config, files, warn
 
 USER_DATA_DIR_FLAG = "--user-data-dir="
 
 
-def mark_clean_exit(cls, cmd):
+def mark_clean_exit(cls: str, cmd: str) -> int:
     user_data_dir = find_user_data_dir(cls, cmd)
     if user_data_dir is None:
         return 0
@@ -22,7 +25,7 @@ def mark_clean_exit(cls, cmd):
     )
 
 
-def find_user_data_dir(cls, cmd):
+def find_user_data_dir(cls: str, cmd: str) -> str | None:
     """The --user-data-dir the window was launched with, else the default."""
     try:
         tokens = shlex.split(cmd)
@@ -33,10 +36,10 @@ def find_user_data_dir(cls, cmd):
     return path if os.path.isdir(path) else None
 
 
-def set_exit_type_normal(path):
+def set_exit_type_normal(path: str) -> bool:
     try:
         with files.open_regular_file(path) as f:
-            prefs = json.load(f)
+            prefs: dict[str, Any] = json.load(f)
             mode = os.fstat(f.fileno()).st_mode & 0o777
         profile = prefs.setdefault("profile", {})
         if profile.get("exit_type") == "Normal":

@@ -1,12 +1,15 @@
 """Launching the saved windows, each with exec rules for its workspace, floating geometry and pin."""
 
+from __future__ import annotations
+
 import time
 
 from omarchy_last_session import chromium, config, hypr, log
 from omarchy_last_session.restore import pairing, placement
+from omarchy_last_session.session import SavedWindow
 
 
-def sort_for_launch(windows):
+def sort_for_launch(windows: list[SavedWindow]) -> list[SavedWindow]:
     """Browsers first, then workspace by workspace, tiled before floating, left
     to right: the closest Hyprland's tiling gets to the old layout."""
     return sorted(
@@ -21,13 +24,13 @@ def sort_for_launch(windows):
     )
 
 
-def launch_saved_windows(windows, origins, running):
+def launch_saved_windows(windows: list[SavedWindow], origins: hypr.Origins, running: set[str]) -> None:
     """Everything is launched before anything is waited for, so a slow app
     overlaps with the rest instead of holding up the queue. The exception is a
     web app of a browser still starting: launched first, it would start the
     browser without --restore-last-session, and Chromium ignores that flag once
     it is running, opening a new tab instead of the session."""
-    starting = set()
+    starting: set[str] = set()
     for win in windows:
         if not win["spawn"]:
             continue
@@ -44,7 +47,7 @@ def launch_saved_windows(windows, origins, running):
         time.sleep(config.SPAWN_STAGGER)
 
 
-def wait_for_program(program):
+def wait_for_program(program: str) -> bool:
     """Until a window of `program` maps, which means its process is up and
     takes further launches as its own, or BROWSER_START_TIMEOUT passes. The
     browser was not running, so any such window is the one just launched, or a
@@ -59,7 +62,7 @@ def wait_for_program(program):
     return False
 
 
-def build_exec_rules(win, origins):
+def build_exec_rules(win: SavedWindow, origins: hypr.Origins) -> str:
     selector = hypr.format_workspace_selector(win["workspace"]) + " silent"
     rules = [f"workspace = {hypr.quote_lua(selector)}"]
     if win["floating"]:

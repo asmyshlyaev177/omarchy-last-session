@@ -6,3 +6,9 @@ include = ["bin/omarchy-last-session", "omarchy_last_session/*.py", "tests/*.py"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]
+
+[tool.mypy]
+python_version = "3.9"
+strict = true
+# Tests are left out: their fixtures are plain dicts from untyped helpers.
+files = ["omarchy_last_session", "bin/omarchy-last-session"]

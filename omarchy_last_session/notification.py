@@ -1,7 +1,10 @@
 """Omarchy's toasts, sent and taken down through its own commands, which reach the shell that draws them."""
 
+from __future__ import annotations
+
 import contextlib
 import subprocess
+from collections.abc import Iterator
 
 # Not omarchy-action, the default, which shows through do-not-disturb as the
 # answer to something the user just did.
@@ -13,7 +16,7 @@ DISMISS_WAIT = 5
 
 
 @contextlib.contextmanager
-def showing(summary, body, glyph, seconds):
+def showing(summary: str, body: str, glyph: str, seconds: float) -> Iterator[None]:
     """A toast up while the block runs, or for `seconds` should restore be killed
     first. Neither command is waited on at the start, and a missing one is skipped."""
     milliseconds = str(round(seconds * 1000))
@@ -31,7 +34,7 @@ def showing(summary, body, glyph, seconds):
         wait_or_kill(start_quietly(["omarchy-notification-dismiss", summary]), DISMISS_WAIT)
 
 
-def start_quietly(argv):
+def start_quietly(argv: list[str]) -> subprocess.Popen[bytes] | None:
     """The process, or None when the command is missing. Its output would land in restore's."""
     try:
         return subprocess.Popen(
@@ -41,7 +44,7 @@ def start_quietly(argv):
         return None
 
 
-def wait_or_kill(process, seconds):
+def wait_or_kill(process: subprocess.Popen[bytes] | None, seconds: float) -> None:
     if process is None:
         return
     try:

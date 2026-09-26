@@ -1,14 +1,18 @@
 """Workspaces held open through the pass, then after the sweep: groups rebuilt,
 workspace names put back, workspaces moved onto their monitors and shown there."""
 
+from __future__ import annotations
+
 from omarchy_last_session import hypr
+from omarchy_last_session.restore.pairing import Pairing
+from omarchy_last_session.session import SavedWindow
 
 # The Lua global holding the rules hold_workspaces added, so release_workspaces
 # can switch them off: a rule added at runtime has no other handle.
 HOLDS = "_G.omarchy_last_session_holds"
 
 
-def hold_workspaces(windows):
+def hold_workspaces(windows: list[SavedWindow]) -> int:
     """Makes each saved workspace that does not exist yet persistent until
     release_workspaces. Without it a workspace exists only once a window lands
     on it, in whatever order the apps come up, and a setup that closes gaps in
@@ -26,7 +30,7 @@ def hold_workspaces(windows):
     return len(held)
 
 
-def find_workspaces_to_hold(windows):
+def find_workspaces_to_hold(windows: list[SavedWindow]) -> list[str]:
     """Selectors of the saved workspaces yet to exist, numbered ones first and in order."""
     # One that exists is shown or holds a window, so it cannot go. Held, it moved onto
     # the focused monitor, and the monitor it left showed a new empty workspace in
@@ -38,21 +42,22 @@ def find_workspaces_to_hold(windows):
     return sorted(missing, key=get_hold_order)
 
 
-def get_hold_order(selector):
+def get_hold_order(selector: str) -> tuple[int, int, str]:
     """Numbered workspaces in number order, then named ones."""
     return (0, int(selector), "") if selector.isdigit() else (1, 0, selector)
 
 
-def release_workspaces():
+def release_workspaces() -> None:
     """An empty workspace goes once it is no longer held, as it would have."""
     hypr.eval_lua(f"for _, rule in ipairs({HOLDS} or {{}}) do rule:set_enabled(false) end {HOLDS} = nil")
 
 
-def build_groups(placed):
-    members = {}
+def build_groups(placed: list[Pairing]) -> int:
+    members: dict[int, list[Pairing]] = {}
     for win, address in placed:
-        if win.get("group") is not None:
-            members.setdefault(win["group"], []).append((win, address))
+        group = win.get("group")
+        if group is not None:
+            members.setdefault(group, []).append((win, address))
     built = 0
     for group in sorted(members):
         # Tabs follow where the windows sat, not the order they turned up.
@@ -62,7 +67,7 @@ def build_groups(placed):
     return built
 
 
-def build_group(addresses):
+def build_group(addresses: list[str]) -> bool:
     """The first member becomes a group and the rest are added to it."""
     if len(addresses) < 2:
         return False
@@ -73,11 +78,11 @@ def build_group(addresses):
     return True
 
 
-def name_workspaces(windows):
+def name_workspaces(windows: list[SavedWindow]) -> int:
     """A numbered workspace is recreated by its number, which comes back with
     no name, so the name it was saved under is put back on it."""
     live = {w.get("id"): w.get("name") for w in hypr.query("workspaces")}
-    wanted = {}
+    wanted: dict[int, str] = {}
     for win in windows:
         number, name = win["workspace"].get("id"), win["workspace"].get("name", "")
         if isinstance(number, int) and number > 0 and name and name != str(number) and number in live:
@@ -91,7 +96,7 @@ def name_workspaces(windows):
     return renamed
 
 
-def place_workspaces_on_monitors(windows):
+def place_workspaces_on_monitors(windows: list[SavedWindow]) -> int:
     """Workspaces bind to no monitor, so at boot they pile onto the focused
     one. Each moves as a whole onto the monitor it was saved on, by name,
     since Hyprland renumbers monitors across boots."""
@@ -99,7 +104,7 @@ def place_workspaces_on_monitors(windows):
         return 0
     # By selector, not id: a named workspace is numbered anew on every boot.
     live = {hypr.format_workspace_selector(c["workspace"]) for c in hypr.get_managed_clients().values()}
-    wanted = {}
+    wanted: dict[str, str] = {}
     for win in windows:
         selector, monitor = hypr.format_workspace_selector(win["workspace"]), win.get("monitor_name")
         # A special workspace shows on whichever monitor toggles it.
@@ -111,14 +116,14 @@ def place_workspaces_on_monitors(windows):
     return len(wanted)
 
 
-def show_saved_workspaces(windows):
+def show_saved_workspaces(windows: list[SavedWindow]) -> int:
     """A workspace moved onto a monitor is not the one it shows, and the monitor it
     left falls back to a new empty workspace, so each monitor is switched back to
     the workspace it showed when saved."""
     monitors = hypr.query("monitors")
     shown = {m.get("name"): hypr.format_workspace_selector(m.get("activeWorkspace", {})) for m in monitors}
     focused = next((m.get("name") for m in monitors if m.get("focused")), None)
-    wanted = {}
+    wanted: dict[str, str] = {}
     for win in windows:
         if win.get("workspace_shown") and win.get("monitor_name") in shown:
             wanted.setdefault(win["monitor_name"], hypr.format_workspace_selector(win["workspace"]))

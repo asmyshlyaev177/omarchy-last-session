@@ -57,14 +57,17 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests                                  # 398 tests, about two seconds
+python3 -m unittest discover -s tests                                  # 408 tests, about two seconds
 uv run --no-project --python 3.9 python -m unittest discover -s tests  # the CI's 3.9 leg
 uvx ruff check . && uvx ruff format --check .                          # config in pyproject.toml
+uvx mypy==1.19.1                                                       # strict, config in pyproject.toml
 omarchy plugin validate .
 OLS_CONTAINER=podman tests/integration/run.sh                          # live suite, about 75 s
 ```
 
-CI runs the unit suite on Python 3.9 and 3.13 and the two ruff checks. The live job only runs when the repository variable `OLS_LIVE_RUNNER` names a self-hosted runner with a DRM render node. Keep the code 3.9 compatible, so no `match`, no `X | Y` unions and no `zip(strict=...)`.
+CI runs the unit suite on Python 3.9 and 3.13, the two ruff checks and mypy. The live job only runs when the repository variable `OLS_LIVE_RUNNER` names a self-hosted runner with a DRM render node. Keep the code 3.9 compatible, so no `match`, no `X | Y` unions and no `zip(strict=...)`.
+
+Every module starts with `from __future__ import annotations`, so an annotation is never evaluated and `X | None` is fine in one. A type alias or a functional `TypedDict` runs at import, so it spells unions with `Optional` and `Union`. mypy checks the package strictly and leaves the tests out: their fixtures are plain dicts from untyped helpers. The one `Any` is `config.Settings`, whose values `parse_value` checks against each default's type.
 
 `run.sh` bind-mounts the repo live, so run it from a frozen copy while the tree is being edited (`git archive HEAD | tar -x -C <scratch dir>`, plus an `rsync` of uncommitted work).
 
@@ -91,7 +94,7 @@ Comments explain what a name cannot. No comment restates the line under it, no d
 The installed plugin at `~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session` is a git clone of the GitHub repository, not of this checkout. `omarchy plugin update io.github.asmyshlyaev177.last-session` fast-forwards it after a push. For uncommitted work, copy the tree over it and restart the shell:
 
 ```sh
-rsync -a --delete --exclude='.git/' --exclude='__pycache__/' --exclude='.ruff_cache/' \
+rsync -a --delete --exclude='.git/' --exclude='__pycache__/' --exclude='.ruff_cache/' --exclude='.mypy_cache/' \
   ./ ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/
 omarchy-restart-shell
 ```

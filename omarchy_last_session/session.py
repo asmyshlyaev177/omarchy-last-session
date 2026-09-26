@@ -1,16 +1,51 @@
 """The snapshot: what is open now, written to the state directory."""
 
+from __future__ import annotations
+
 import glob
 import json
 import os
 import signal
 import stat
 import time
+from typing import Optional, TextIO, TypedDict
 
 from omarchy_last_session import config, files, hypr, kitty, proc, relaunch, warn
 
+# "class" is a keyword, so the functional form. Every key here has been written
+# since the first release.
+_SavedWindowKeys = TypedDict(
+    "_SavedWindowKeys",
+    {
+        "class": str,
+        "title": str,
+        "workspace": hypr.Workspace,
+        "at": list[int],
+        "size": list[int],
+        "floating": bool,
+        "pinned": bool,
+        "fullscreen": int,
+        "monitor": int,
+        "monitor_name": str,
+        "monitor_at": list[int],
+        "cmd": str,
+        "spawn": bool,
+        "group": Optional[int],
+    },
+)
 
-def save_session():
+
+class SavedWindow(_SavedWindowKeys, total=False):
+    # Written since 2026-09-26, so a snapshot saved before then has none.
+    workspace_shown: bool
+
+
+class Snapshot(TypedDict, total=False):
+    saved_at: float
+    windows: list[SavedWindow]
+
+
+def save_session() -> int:
     windows = snapshot_windows()
     write_session(windows)
     return len(windows)
@@ -21,13 +56,13 @@ class SaveScheduler:
     SETTLE_DELAY of quiet when they vanish, and every SAVE_INTERVAL regardless,
     since titles and floating geometry change without a window event."""
 
-    def __init__(self):
-        self.saved = None
+    def __init__(self) -> None:
+        self.saved: hypr.Layout | None = None
         self.saved_at = 0.0
-        self.current = None
+        self.current: hypr.Layout | None = None
         self.still_since = 0.0
 
-    def is_due(self, layout, now):
+    def is_due(self, layout: hypr.Layout, now: float) -> bool:
         if layout != self.current:
             self.current, self.still_since = layout, now
         if self.saved is None:
@@ -39,10 +74,10 @@ class SaveScheduler:
             return False
         return layout != self.saved or now - self.saved_at >= config.SAVE_INTERVAL
 
-    def mark_saved(self, now):
+    def mark_saved(self, now: float) -> None:
         self.saved, self.saved_at = self.current, now
 
-    def seconds_until_recheck(self, now):
+    def seconds_until_recheck(self, now: float) -> float:
         """How long the daemon may sleep if nothing happens."""
         deadlines = [self.saved_at + config.SAVE_INTERVAL]
         if self.current != self.saved:
@@ -50,12 +85,13 @@ class SaveScheduler:
         return max(0.0, min(deadlines) - now)
 
 
-def snapshot_windows():
+def snapshot_windows() -> list[SavedWindow]:
     clients = list(hypr.get_managed_clients().values())
     group_of = assign_group_ids(clients)
     layout = hypr.get_monitor_layout()
     sessions = write_kitty_sessions(clients)
-    windows, launched = [], set()
+    windows: list[SavedWindow] = []
+    launched: set[int] = set()
     for client in clients:
         pid = client.get("pid", -1)
         if pid <= 0:
@@ -70,20 +106,22 @@ def snapshot_windows():
         # leave the browser unlaunched.
         if once:
             launched.add(pid)
-        windows.append(build_window_entry(client, cmd, spawn, group_of.get(client.get("address")), layout))
+        windows.append(
+            build_window_entry(client, cmd, spawn, group_of.get(client.get("address", "")), layout)
+        )
     return windows
 
 
-def does_launch_once(client, has_session_file):
+def does_launch_once(client: hypr.Client, has_session_file: bool) -> bool:
     """Whether one launch of this process serves all of its windows. A kitty
     session file holds every OS window of its instance, so it counts."""
     return has_session_file or client["class"] in config.SINGLE_INSTANCE_CLASSES
 
 
-def write_kitty_sessions(clients):
+def write_kitty_sessions(clients: list[hypr.Client]) -> dict[int, str]:
     """pid -> session file, for each kitty that describes itself. Files left by
     instances that are gone are dropped."""
-    written = {}
+    written: dict[int, str] = {}
     # A kitty taken out of [terminals] is relaunched like any other window.
     known = config.KITTY_CLASS in config.TERMINALS
     pids = sorted(
@@ -100,8 +138,10 @@ def write_kitty_sessions(clients):
     return written
 
 
-def build_window_entry(client, cmd, spawn, group, layout):
-    monitor_name, monitor_at, shown_workspace = layout.get(client.get("monitor"), ("", [0, 0], None))
+def build_window_entry(
+    client: hypr.Client, cmd: str, spawn: bool, group: int | None, layout: dict[int, hypr.MonitorPlace]
+) -> SavedWindow:
+    monitor = layout.get(client.get("monitor", -1), hypr.MonitorPlace("", [0, 0], None))
     return {
         "class": client["class"],
         "title": client.get("title", ""),
@@ -112,18 +152,19 @@ def build_window_entry(client, cmd, spawn, group, layout):
         "pinned": client.get("pinned", False),
         "fullscreen": client.get("fullscreen", 0),
         "monitor": client.get("monitor", 0),
-        "monitor_name": monitor_name,
-        "monitor_at": monitor_at,
-        "workspace_shown": client["workspace"].get("id") == shown_workspace,
+        "monitor_name": monitor.name,
+        "monitor_at": monitor.at,
+        "workspace_shown": client["workspace"].get("id") == monitor.shown_workspace,
         "cmd": cmd,
         "spawn": spawn,
         "group": group,
     }
 
 
-def assign_group_ids(clients):
+def assign_group_ids(clients: list[hypr.Client]) -> dict[str, int]:
     """address -> a stable id per Hyprland group of two or more."""
-    ids, seen = {}, {}
+    ids: dict[str, int] = {}
+    seen: dict[tuple[str, ...], int] = {}
     for client in clients:
         members = tuple(sorted(client.get("grouped") or []))
         if len(members) >= 2:
@@ -131,11 +172,11 @@ def assign_group_ids(clients):
     return ids
 
 
-def write_session(windows):
+def write_session(windows: list[SavedWindow]) -> None:
     write_private(config.SESSION_FILE, json.dumps({"saved_at": time.time(), "windows": windows}, indent=2))
 
 
-def keep_restore_copy():
+def keep_restore_copy() -> None:
     """Keeps what restore is about to use, which the daemon soon overwrites."""
     try:
         copy_session_to(config.LAST_RESTORE_FILE)
@@ -143,16 +184,16 @@ def keep_restore_copy():
         warn(f"could not keep a copy of the restored session: {e}")
 
 
-def copy_session_to(path):
+def copy_session_to(path: str) -> None:
     with open_private(config.SESSION_FILE) as f:
         write_private(path, f.read())
 
 
-def load_session():
+def load_session() -> list[SavedWindow]:
     """The saved windows still worth restoring; empty without a usable snapshot."""
     try:
         with open_private(config.SESSION_FILE) as f:
-            snapshot = json.load(f)
+            snapshot: Snapshot = json.load(f)
     except FileNotFoundError:
         return []
     except (OSError, ValueError) as e:
@@ -164,7 +205,7 @@ def load_session():
 # A snapshot holds every window's command line and title, so the directory and
 # its files stay this user's alone whatever the umask, and no symlink in the
 # state directory's place is followed.
-def ensure_private_state_dir():
+def ensure_private_state_dir() -> None:
     """Creates the directory 0700, repairing one an older version left open.
     A symlink or another user's directory is refused."""
     os.makedirs(config.STATE_DIR, mode=0o700, exist_ok=True)
@@ -175,13 +216,13 @@ def ensure_private_state_dir():
         os.chmod(config.STATE_DIR, 0o700)
 
 
-def write_private(path, text):
+def write_private(path: str, text: str) -> None:
     """Replaces a state file atomically with one of mode 0600."""
     ensure_private_state_dir()
     files.replace_file(path, text, 0o600)
 
 
-def open_private(path):
+def open_private(path: str) -> TextIO:
     """Opens a state file for reading, repairing one left readable by others."""
     ensure_private_state_dir()
     f = files.open_regular_file(path)
@@ -190,7 +231,7 @@ def open_private(path):
     return f
 
 
-def quit_session_keeping_apps(timeout=config.GRACEFUL_QUIT_TIMEOUT):
+def quit_session_keeping_apps(timeout: float = config.GRACEFUL_QUIT_TIMEOUT) -> set[int]:
     """SIGTERM them so they write their session out, rather than let the power
     menu close their windows. Returns the pids still alive at the timeout."""
     pids = {
@@ -198,7 +239,7 @@ def quit_session_keeping_apps(timeout=config.GRACEFUL_QUIT_TIMEOUT):
         for c in hypr.query("clients")
         if c.get("class") in config.SESSION_KEEPING_CLASSES and c.get("pid", -1) > 0
     }
-    signalled = set()
+    signalled: set[int] = set()
     for pid in pids:
         try:
             os.kill(pid, signal.SIGTERM)

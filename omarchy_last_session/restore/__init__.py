@@ -1,17 +1,21 @@
 """The restore pass: launch, sweep, group, then name workspaces, place them on monitors
 and show on each monitor the workspace it showed."""
 
+from __future__ import annotations
+
+import contextlib
 import os
 
 from omarchy_last_session import config, hypr, notification, session, warn
 from omarchy_last_session.restore import launch, layout, sweep
+from omarchy_last_session.restore.pairing import Pairing
 
 TOAST_SUMMARY = "Restoring last session\u2026"
 # nf-md-window_restore, from the Nerd Font Omarchy draws its toast glyphs with.
 TOAST_GLYPH = "\U000f05b2"
 
 
-def restore_session():
+def restore_session() -> None:
     if os.path.exists(config.DISABLE_FLAG):
         return
     windows = session.load_session()
@@ -30,10 +34,10 @@ def restore_session():
             layout.release_workspaces()
 
 
-def restore_windows(windows, already_open):
+def restore_windows(windows: list[session.SavedWindow], already_open: dict[str, hypr.Client]) -> None:
     origins = hypr.get_monitor_origins()
     ordered = launch.sort_for_launch(windows)
-    launch.launch_saved_windows(ordered, origins, {c.get("class") for c in already_open.values()})
+    launch.launch_saved_windows(ordered, origins, {c.get("class", "") for c in already_open.values()})
     placed, missing = sweep.sweep(ordered, set(already_open), origins)
     for win in missing:
         warn(describe_missing(win, placed, missing))
@@ -43,7 +47,7 @@ def restore_windows(windows, already_open):
     layout.show_saved_workspaces(windows)
 
 
-def show_toast(windows):
+def show_toast(windows: list[session.SavedWindow]) -> contextlib.AbstractContextManager[None]:
     count = len(windows)
     # Every launch, the sweep waited out, and a moment for the grouping and
     # moves after it: the toast outlives the pass only when restore is killed.
@@ -52,7 +56,9 @@ def show_toast(windows):
     return notification.showing(TOAST_SUMMARY, body, TOAST_GLYPH, seconds)
 
 
-def describe_missing(win, placed, missing):
+def describe_missing(
+    win: session.SavedWindow, placed: list[Pairing], missing: list[session.SavedWindow]
+) -> str:
     cls, workspace = win["class"], win["workspace"].get("id")
     line = f"no window turned up for {cls} '{win.get('title', '')}' from workspace {workspace}"
     reopened = sum(entry["class"] == cls for entry, _ in placed)

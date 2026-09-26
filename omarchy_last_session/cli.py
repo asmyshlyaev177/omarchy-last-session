@@ -17,9 +17,12 @@ State lives in $XDG_STATE_HOME/omarchy-last-session, or the state_dir set there.
 Skip the next restore:   touch <state dir>/disabled
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import time
+from collections.abc import Callable
 
 from omarchy_last_session import config, hypr, log, restore, session, warn
 
@@ -30,11 +33,11 @@ MENU_ICON = "󰁯"
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
-def run_save():
+def run_save() -> None:
     print(f"saved {session.save_session()} windows to {config.SESSION_FILE}")
 
 
-def run_shutdown():
+def run_shutdown() -> None:
     print(f"saved {session.save_session()} windows")
     try:
         session.copy_session_to(config.LAST_SHUTDOWN_FILE)
@@ -47,7 +50,7 @@ def run_shutdown():
         print("session-keeping apps exited cleanly")
 
 
-def run_daemon():
+def run_daemon() -> None:
     time.sleep(config.DAEMON_INITIAL_DELAY)
     scheduler = session.SaveScheduler()
     events = hypr.open_event_stream()
@@ -55,7 +58,7 @@ def run_daemon():
         pass
 
 
-def run_config():
+def run_config() -> int:
     try:
         os.execvp(CONFIG_EDITOR, [CONFIG_EDITOR, config.CONFIG_FILE])
     except FileNotFoundError:
@@ -63,11 +66,11 @@ def run_config():
         return 1
 
 
-def run_menu():
+def run_menu() -> None:
     print(render_menu_rows(tilde(PLUGIN_DIR)), end="")
 
 
-def render_menu_rows(root):
+def render_menu_rows(root: str) -> str:
     """JSONC rows for the user's menu file. The config row hides itself while
     the plugin directory is gone: the directory outlives any move of the
     launcher inside it. The power rows override Omarchy's own, so they never
@@ -83,14 +86,14 @@ def render_menu_rows(root):
     return "\n".join(rows) + "\n"
 
 
-def tilde(path):
+def tilde(path: str) -> str:
     """~ for the home directory, which the menu's bash expands, so the rows read
     the same on every machine."""
     home = os.path.expanduser("~")
     return "~" + path[len(home) :] if path == home or path.startswith(home + os.sep) else path
 
 
-def save_if_due(scheduler):
+def save_if_due(scheduler: session.SaveScheduler) -> float:
     """Returns how long the daemon may sleep before looking again."""
     try:
         if config.reload_if_changed():
@@ -105,7 +108,7 @@ def save_if_due(scheduler):
         return config.SAVE_INTERVAL
 
 
-COMMANDS = {
+COMMANDS: dict[str, Callable[[], int | None]] = {
     "save": run_save,
     "shutdown": run_shutdown,
     "restore": restore.restore_session,
@@ -115,11 +118,11 @@ COMMANDS = {
 }
 
 
-def main(argv=None):
+def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     command = COMMANDS.get(args[0]) if args else None
     if command is None:
-        print(__doc__.strip(), file=sys.stderr)
+        print((__doc__ or "").strip(), file=sys.stderr)
         return 1
     config.ensure_file()
     return command() or 0

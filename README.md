@@ -177,12 +177,13 @@ All four files live in `~/.local/state/omarchy-last-session`.
 ```sh
 python3 -m unittest discover -s tests -v
 uvx ruff check . && uvx ruff format --check .
+uvx mypy==1.19.1                          # strict type check, settings in pyproject.toml
 omarchy plugin validate .
 tests/integration/run.sh                  # live, needs Podman or Docker and a DRM render node
 tests/integration/run.sh -k two_monitors  # one live test
 ```
 
-The code is the `omarchy_last_session` package; `bin/omarchy-last-session` only starts it. `CLAUDE.md` holds the notes for changing it.
+The code is the `omarchy_last_session` package; `bin/omarchy-last-session` only starts it. `docs/development_notes.md` holds the notes for changing it.
 
 | Module | What it holds |
 | --- | --- |
