@@ -170,6 +170,7 @@ uvx mypy==1.19.1                          # strict type check, settings in pypro
 uvx pyright==1.1.414                      # the same with the checker Pylance runs
 omarchy plugin validate .
 tests/integration/run.sh                  # live, needs Podman or Docker and a DRM render node
+OLS_VM=1 tests/integration/run.sh         # live in a VM, needs /dev/kvm instead of a render node
 tests/integration/run.sh -k two_monitors  # one live test
 ```
 
