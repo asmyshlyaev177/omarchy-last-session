@@ -50,6 +50,10 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 - Workspace rules on Hyprland 0.56.2, checked 2026-09-25 with three monitors: a rule added at runtime makes its workspace at once, out of sight, and has no handle but the one returned, kept in the Lua global `layout.HOLDS`; switched off, an empty workspace goes. A rule without a monitor moves an existing workspace onto the focused monitor, and the monitor it left shows a new empty workspace, which hid every restored window on DP-9 and HDMI-A-1. A rule naming a monitor that is not connected makes nothing.
 - A workspace moved onto a monitor is not the one that monitor shows, and a monitor whose shown workspace moves away falls back to another workspace on it, or a new empty one. So which workspace each monitor ends up showing depends on where the moved workspaces were made: made on their saved monitors, one monitor of `test_session_round_trips_across_a_reboot`, whose monitors come up in the other order, came back showing an empty workspace.
 - So each saved window records whether its workspace was the one its monitor showed (`workspace_shown`), and `layout.show_saved_workspaces` switches every monitor back to that workspace after the moves, the focused monitor last. Every login gives eDP-1 workspace 1 and DP-9 workspace 2 here, and a session saved with the two the other way round brought eDP-1 back on a new empty workspace in front of 2 (2026-09-26).
+- hyprctl lists a group's members in tab order in every member's `grouped`. Hidden tabs keep the group's box (`CWindowGroupTarget::updatePos`, Hyprland 0.56.2), so `at` cannot order them. A maximized shown tab has the work area's box instead. Until 2026-10-17 restore sorted by `at`, and tabs came back in the order the sweep paired their windows. Tabs three, one, four, two came back as one, two, three, four.
+- hyprctl's JSON cannot say which tab a group shows. `visible` is false on every tab while another window is fullscreen over the group, as a Steam game was over a group holding Steam on this desktop (2026-10-17). So save reads each group's `current` tab through `hyprctl repl`, the one request that returns what its Lua returns (`hypr.get_shown_tabs`).
+- `group:add` without an index puts a window after the current tab, and a tab that takes focus becomes the current one (`CGroup::add`, `CGroup::setCurrent`). With the first tab focused before each add, tabs three, one, four, two came back as three, two, four, one. So `layout.add_to_group` adds each window at `group.size + 1`.
+- Each window that joins a group becomes its shown tab, and grouping a window clears its fullscreen (`Actions::toggleGroup`, `CGroup::add`). `layout.show_saved_tab` switches back to the saved tab with `hl.dsp.group.active`, which takes no focus. It then sets that tab's saved fullscreen again.
 - Chromium's session file (`~/.config/BraveSoftware/Brave-Browser/Default/Sessions/Session_*`, the last two runs) is SNSS: an 8-byte header, then per command a u16 size, a u8 id and the payload. Id 0 is {int32 window, int32 tab}, 6 a pickle holding the tab id and its page's URL and title, 16 and 17 a closed tab or window {int32 id, pad, int64 µs since 1601}.
 - The toast is drawn by the shell's own notification service (`$OMARCHY_PATH/shell/plugins/notifications`), which is the freedesktop server here. Its card is a copy of the notification, so a freedesktop CloseNotification leaves it up (still on screen 1.5 s after one, 2026-09-25); `omarchy-notification-dismiss <summary>` goes through the shell's IPC and takes it down. A low-urgency card stays at least 5 s and at most 30 s whatever `-t` asks, so a restore that waits out a 30 s sweep outlives its toast.
 - The shell lets toasts from the default app name, `omarchy-action`, through do-not-disturb, so restore sends under its own. Under DND the shell writes a toast straight into its history, which keeps the last ten, and a toast that was on screen lands there once it leaves, so each restore adds one entry either way. DND is on on this desktop (2026-09-25), so a restore here shows no toast. The shell mirrors each toast on screen to `~/.local/state/omarchy/notifications/<ms>-<id>.json` and moves it to `history/` when it leaves, which is how the toast was checked: on screen while restore's block ran and gone 0.1 s after it.
@@ -59,14 +63,14 @@ Omarchy shell plugin that saves the open windows and reopens them after a reboot
 ## Verification
 
 ```sh
-python3 -m unittest discover -s tests                                  # 413 tests, about two seconds
+python3 -m unittest discover -s tests                                  # 426 tests, about two seconds
 uv run --no-project --python 3.9 python -m unittest discover -s tests  # the CI's 3.9 leg
 uvx ruff check . && uvx ruff format --check .                          # config in pyproject.toml
 uvx mypy==1.19.1                                                       # strict, config in pyproject.toml
 uvx pyright==1.1.414                                                   # strict, config in pyproject.toml
 omarchy plugin validate .
-OLS_CONTAINER=podman tests/integration/run.sh                          # live suite, about 140 s
-OLS_VM=1 tests/integration/run.sh                                      # the same in a VM, as CI runs it, about 200 s
+OLS_CONTAINER=podman tests/integration/run.sh                          # live suite, about 25 s on 16 threads
+OLS_VM=1 tests/integration/run.sh                                      # the same in a VM, as CI runs it, about 60 s, 130 s on 4 CPUs
 ```
 
 CI runs the unit suite on Python 3.9 and 3.13, the two ruff checks, mypy, Pyright, and the live suite with `OLS_VM=1`. Keep the code 3.9 compatible, so no `match`, no `X | Y` unions and no `zip(strict=...)`.
@@ -76,9 +80,13 @@ Every module starts with `from __future__ import annotations`, so an annotation 
 `run.sh` bind-mounts the repo live, so run it from a frozen copy while the tree is being edited (`git archive HEAD | tar -x -C <scratch dir>`, plus an `rsync` of uncommitted work).
 
 - GitHub's hosted runners have KVM but no render node, only a display-only `hyperv_drm` card. So with `OLS_VM=1` the container boots `/boot/vmlinuz-linux` with `vng` (virtme-ng), which shares the container's files with the VM over virtiofs.
-- `vm-run.sh` loads vkms in the VM and passes its card as `OLS_DRM_CARD`. Hyprland then drives the card itself (`AQ_DRM_DEVICES`, libseat's `noop` backend) instead of nesting in labwc, and Mesa renders with llvmpipe.
+- `vm-run.sh` loads vkms with `create_default_dev=0` and makes one card per job through configfs, because a card takes one compositor at a time, then passes them as `OLS_DRM_CARDS`. Hyprland drives its card itself (`AQ_DRM_DEVICES`, libseat's `noop` backend) instead of nesting in labwc, and Mesa renders with llvmpipe.
+- A configfs card names its connector `Virtual-<n>`, with n counting across cards, so `vm-run.sh` disconnects each connector rather than `hyprland.lua` disabling outputs by name.
 - Over 9p (`vng --force-9p`) the suite took 333 s instead of 185 s over virtiofs (2026-09-26), so keep virtiofs.
 - CI has no Omarchy, so there the suite runs under plain Hyprland rules, without the Omarchy defaults `run.sh` mounts in on this desktop.
+- `parallel.py` runs each live test in a process and process group of its own, `OLS_JOBS` at a time, and `run.sh` sets that to half the CPUs, rounded up. A test starts its own labwc, Hyprland, home and runtime dir, so tests share only the render node. On 2026-10-17 the 21 tests took 234 s one at a time, 142 s with the two fixes below, and 21-26 s at 8 jobs.
+- Hyprland 0.56.2 segfaults at exit while a group is open (`CHyprGroupBarDecoration::draw`, from `CCompositor::cleanup`). The host's systemd-coredump took 2-10 s to store each dump and kept the clients connected meanwhile, 84 s of the 234 s (2026-10-17), so `run.sh` passes `--ulimit core=0`. `coredumpctl list` after a run shows whether a dump got stored.
+- A fresh Chromium profile has no `Preferences` for its first seconds. Logged out before Chromium writes the file, the next launch takes the profile for a new one and restores no window: 10 of 48 web app runs failed that way with 16 at once (2026-10-17). `has_chromium_saved` waits for the file as well as for the session file.
 
 ## Writing
 

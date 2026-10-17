@@ -13,11 +13,10 @@ end
 
 hl.monitor({ output = "MON-A", mode = "preferred", position = "0x0", scale = 1 })
 hl.monitor({ output = "MON-B", mode = "preferred", position = "1920x0", scale = 1.25 })
--- The window the nested compositor opens on its parent, and the output of the
--- vkms card in run.sh's VM; only the two headless monitors above should exist,
--- as on a real machine.
+-- The window the nested compositor opens on its parent: only the two headless
+-- monitors above should exist, as on a real machine. The cards of run.sh's VM
+-- have their connectors unplugged, so they add no output.
 hl.monitor({ output = "WAYLAND-1", disabled = true })
-hl.monitor({ output = "Virtual-1", disabled = true })
 
 hl.config({
   animations = { enabled = false },

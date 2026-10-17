@@ -8,7 +8,7 @@ import os
 import signal
 import stat
 import time
-from typing import Optional, TextIO, TypedDict
+from typing import NamedTuple, Optional, TextIO, TypedDict
 
 from omarchy_last_session import config, files, hypr, kitty, proc, relaunch, warn
 
@@ -38,11 +38,20 @@ _SavedWindowKeys = TypedDict(
 class SavedWindow(_SavedWindowKeys, total=False):
     # Written since 2026-09-26, so a snapshot saved before then has none.
     workspace_shown: bool
+    # Written since 2026-10-17, and only for a window in a group.
+    group_position: int
+    shown_in_group: bool
 
 
 class Snapshot(TypedDict, total=False):
     saved_at: float
     windows: list[SavedWindow]
+
+
+class GroupSeat(NamedTuple):
+    group: int
+    position: int
+    shown: bool
 
 
 def save_session() -> int:
@@ -87,7 +96,7 @@ class SaveScheduler:
 
 def snapshot_windows() -> list[SavedWindow]:
     clients = list(hypr.get_managed_clients().values())
-    group_of = assign_group_ids(clients)
+    seats = find_group_seats(clients)
     layout = hypr.get_monitor_layout()
     sessions = write_kitty_sessions(clients)
     windows: list[SavedWindow] = []
@@ -106,9 +115,7 @@ def snapshot_windows() -> list[SavedWindow]:
         # leave the browser unlaunched.
         if once:
             launched.add(pid)
-        windows.append(
-            build_window_entry(client, cmd, spawn, group_of.get(client.get("address", "")), layout)
-        )
+        windows.append(build_window_entry(client, cmd, spawn, seats.get(client.get("address", "")), layout))
     return windows
 
 
@@ -139,10 +146,10 @@ def write_kitty_sessions(clients: list[hypr.Client]) -> dict[int, str]:
 
 
 def build_window_entry(
-    client: hypr.Client, cmd: str, spawn: bool, group: int | None, layout: dict[int, hypr.MonitorPlace]
+    client: hypr.Client, cmd: str, spawn: bool, seat: GroupSeat | None, layout: dict[int, hypr.MonitorPlace]
 ) -> SavedWindow:
     monitor = layout.get(client.get("monitor", -1), hypr.MonitorPlace("", [0, 0], None))
-    return {
+    entry: SavedWindow = {
         "class": client["class"],
         "title": client.get("title", ""),
         "workspace": client["workspace"],
@@ -157,19 +164,26 @@ def build_window_entry(
         "workspace_shown": client["workspace"].get("id") == monitor.shown_workspace,
         "cmd": cmd,
         "spawn": spawn,
-        "group": group,
+        "group": None if seat is None else seat.group,
     }
+    if seat is not None:
+        entry["group_position"] = seat.position
+        entry["shown_in_group"] = seat.shown
+    return entry
 
 
-def assign_group_ids(clients: list[hypr.Client]) -> dict[str, int]:
-    """address -> a stable id per Hyprland group of two or more."""
-    ids: dict[str, int] = {}
-    seen: dict[tuple[str, ...], int] = {}
-    for client in clients:
-        members = tuple(sorted(client.get("grouped") or []))
-        if len(members) >= 2:
-            ids[client["address"]] = seen.setdefault(members, len(seen))
-    return ids
+def find_group_seats(clients: list[hypr.Client]) -> dict[str, GroupSeat]:
+    """address -> a stable id per Hyprland group of two or more, the window's tab in it,
+    and whether it is the tab shown. Every member lists its group in tab order."""
+    grouped = [c for c in clients if len(c.get("grouped") or []) >= 2 and c["address"] in c["grouped"]]
+    shown = hypr.get_shown_tabs() if grouped else set[str]()
+    ids: dict[tuple[str, ...], int] = {}
+    seats: dict[str, GroupSeat] = {}
+    for client in grouped:
+        members, address = client["grouped"], client["address"]
+        group = ids.setdefault(tuple(sorted(members)), len(ids))
+        seats[address] = GroupSeat(group, members.index(address), address in shown)
+    return seats
 
 
 def write_session(windows: list[SavedWindow]) -> None:

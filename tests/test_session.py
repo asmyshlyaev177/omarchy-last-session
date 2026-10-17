@@ -128,8 +128,8 @@ class SingleInstanceApps(unittest.TestCase):
 
 
 class GroupCapture(StateDirCase):
-    def saved(self, clients):
-        self.save_with(clients)
+    def saved(self, clients, shown_tabs=()):
+        self.save_with(clients, shown_tabs=shown_tabs)
         return self.read_session()
 
     def test_group_membership_is_recorded(self):
@@ -148,8 +148,37 @@ class GroupCapture(StateDirCase):
         self.assertNotEqual(groups[0], groups[2])
 
     def test_a_group_of_one_is_not_a_group(self):
-        made = grouped_clients(("code", 1, "a"))
-        self.assertIsNone(self.saved(made)[0]["group"])
+        saved = self.saved(grouped_clients(("code", 1, "a")))[0]
+        self.assertEqual(
+            (saved["group"], "group_position" in saved, "shown_in_group" in saved), (None, False, False)
+        )
+
+    def test_each_member_records_its_tab_in_the_group(self):
+        """Every member lists its group in tab order, which need not be the
+        order hyprctl lists the windows themselves in."""
+        in_tab_order = grouped_clients(
+            ("org.kde.kdenlive", 3, "a"), ("code", 1, "a"), ("foot", 2, "a"), ("org.gnome.Mines", 4, None)
+        )
+        listed = [in_tab_order[i] for i in (1, 2, 0, 3)]
+        self.assertEqual([w.get("group_position") for w in self.saved(listed)], [1, 2, 0, None])
+
+    def test_the_tab_a_group_shows_is_recorded(self):
+        made = grouped_clients(("code", 1, "a"), ("foot", 2, "a"), ("org.gnome.Mines", 3, None))
+        saved = self.saved(made, shown_tabs={made[1]["address"]})
+        self.assertEqual([w.get("shown_in_group") for w in saved], [False, True, None])
+
+    def test_a_window_its_own_group_list_leaves_out_is_saved_in_no_group(self):
+        """Hyprland lists every member on every member, so such a list is not one to trust."""
+        made = grouped_clients(("code", 1, "a"), ("foot", 2, "a"))
+        made[0]["grouped"] = ["0xdead", made[1]["address"]]
+        saved = self.saved(made)[0]
+        self.assertEqual((saved["group"], "group_position" in saved), (None, False))
+
+    def test_a_desktop_without_a_group_is_not_asked_which_tab_it_shows(self):
+        """It would cost every save a request for nothing."""
+        with mock.patch.object(hypr, "get_shown_tabs") as asked:
+            session.find_group_seats(grouped_clients(("code", 1, None), ("foot", 2, "a")))
+        asked.assert_not_called()
 
 
 class MonitorCapture(StateDirCase):

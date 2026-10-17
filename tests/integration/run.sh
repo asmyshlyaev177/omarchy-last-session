@@ -4,6 +4,7 @@
 #
 #   tests/integration/run.sh            # every live test
 #   tests/integration/run.sh -k groups  # unittest -k filter
+#   OLS_JOBS=1 tests/integration/run.sh # one test at a time, not half as many as CPUs
 #   OLS_VM=1 tests/integration/run.sh   # in a VM, for a host without a render node
 #
 # The compositor renders through a render node of the host, passed in
@@ -24,6 +25,8 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 image=omarchy-last-session-test
 runtime=${OLS_CONTAINER:-podman}
+# Tests run this many at a time, each with a compositor of its own.
+jobs=${OLS_JOBS:-$(( ($(nproc) + 1) / 2 ))}
 
 mesa_render_node() {
     local node driver
@@ -40,8 +43,8 @@ use_render_node() {
         exit 1
     fi
     args+=(--device "$node" -e WLR_RENDER_DRM_DEVICE="$node"
-           -e OLS_LIVE_TESTS=1 -e PATH=/work/tests/integration/bin:/usr/local/bin:/usr/bin)
-    command=(python3 -m unittest discover -s tests/integration -v "$@")
+           -e OLS_LIVE_TESTS=1 -e OLS_JOBS="$jobs" -e PATH=/work/tests/integration/bin:/usr/local/bin:/usr/bin)
+    command=(python3 tests/integration/parallel.py "$@")
 }
 
 use_vm() {
@@ -52,13 +55,15 @@ use_vm() {
     # On a CI runner /dev/kvm is root:kvm 0660, and the image runs as uid 1000.
     args+=(--device /dev/kvm --group-add "$(stat -c %g /dev/kvm)")
     # --exec takes one command line, which the guest's shell splits again.
-    local tests=/work/tests/integration/vm-run.sh
+    local tests="OLS_JOBS=$jobs /work/tests/integration/vm-run.sh"
     if (( $# )); then tests+=$(printf ' %q' "$@"); fi
     command=(vng --run /boot/vmlinuz-linux --user root --memory 4G --cpus "$(nproc)" --cwd /work
              --exec "$tests")
 }
 
-args=(--rm -v "$repo:/work:ro")
+# Hyprland 0.56.2 segfaults at exit while a group is open. A host's systemd-coredump took
+# 2-10 s to store each dump, with every client still connected: 80 s of a 234 s run.
+args=(--rm --ulimit core=0 -v "$repo:/work:ro")
 # rootless podman maps the host uid into the container; the root docker daemon
 # already runs the image as its own uid 1000 and rejects the flag.
 if [[ $runtime == podman ]]; then args+=(--userns=keep-id); fi

@@ -49,6 +49,10 @@ def place_window(win: SavedWindow, address: str, origins: hypr.Origins, floating
         place_pinned_window(win, target, origins)
     else:
         place_on_workspace(win, target, origins, floating)
+    apply_fullscreen(win, target)
+
+
+def apply_fullscreen(win: SavedWindow, target: str) -> None:
     fullscreen = win.get("fullscreen", 0)
     if fullscreen:
         mode = "fullscreen" if fullscreen & 2 else "maximized"

@@ -345,15 +345,16 @@ class Compositor:
     def config_file(self):
         return os.path.join(self.home, ".config", "omarchy", "last-session.ini")
 
-    def run_script(self, action, state_dir=None):
+    def run_script(self, action, state_dir=None, settings="", env=None):
         """The state directory reaches the script the way it does on a
-        desktop: through the config file under XDG_CONFIG_HOME. Without one
-        the file is left as it is, or as the script itself writes it."""
+        desktop: through the config file under XDG_CONFIG_HOME, with any other
+        `settings` lines after it. Without one the file is left as it is, or as
+        the script itself writes it. `env` is added to the script's environment."""
         if state_dir is not None:
             os.makedirs(os.path.dirname(self.config_file()), exist_ok=True)
             with open(self.config_file(), "w") as f:
-                f.write(f"[general]\nstate_dir = {state_dir}\n")
-        env = dict(self.env, OLS_HYPRCTL_LOG=os.path.join(self.home, "hyprctl.log"))
+                f.write(f"[general]\nstate_dir = {state_dir}\n{settings}")
+        env = dict(self.env, OLS_HYPRCTL_LOG=os.path.join(self.home, "hyprctl.log"), **(env or {}))
         return subprocess.run(
             [sys.executable, SCRIPT, action], env=env, capture_output=True, text=True, timeout=180
         )
@@ -484,13 +485,34 @@ def shape(session):
 
 
 def group_shapes(session):
+    """Each group's workspace, its windows in tab order, and the one it showed."""
     members = {}
     for w in session["windows"]:
         if w.get("group") is not None:
             members.setdefault(w["group"], []).append(w)
+    shapes = []
+    for rows in members.values():
+        tabs = sorted(rows, key=lambda w: w["group_position"])
+        shown = [app_name(w["class"]) for w in tabs if w["shown_in_group"]]
+        shapes.append((rows[0]["workspace"]["id"], tuple(app_name(w["class"]) for w in tabs), shown))
+    return sorted(shapes)
+
+
+def describe_groups(clients):
+    """Each group as Hyprland holds it: its workspace, then each tab in order with
+    whether it is the one shown and its fullscreen mode. Groups are told apart by
+    their members' addresses, so two groups of the same apps stay two."""
+    by_address = {c["address"]: c for c in clients}
+    groups = {tuple(c["grouped"]) for c in clients if len(c["grouped"]) >= 2}
     return sorted(
-        (rows[0]["workspace"]["id"], tuple(sorted(app_name(w["class"]) for w in rows)))
-        for rows in members.values()
+        (
+            by_address[members[0]]["workspace"]["name"],
+            tuple(
+                (app_name(by_address[a]["class"]), by_address[a]["visible"], by_address[a]["fullscreen"])
+                for a in members
+            ),
+        )
+        for members in groups
     )
 
 
@@ -578,11 +600,11 @@ class LiveRestore(unittest.TestCase):
             f.write("\n".join(CHROMIUM_FLAGS.split() + ["--proxy-server=127.0.0.1:9"]) + "\n")
 
     def has_chromium_saved(self, pages):
-        """Whether Chromium's newest session file holds every page's URL, which it stores as plain text."""
-        sessions = glob.glob(
-            os.path.join(self.comp.home, ".config", "chromium", "Default", "Sessions", "Session_*")
-        )
-        if not sessions:
+        """Whether Chromium wrote what its next launch reads: Preferences, without which it takes the
+        profile for a new one and restores nothing, and a session file holding every page's URL."""
+        profile = os.path.join(self.comp.home, ".config", "chromium", "Default")
+        sessions = glob.glob(os.path.join(profile, "Sessions", "Session_*"))
+        if not sessions or not os.path.exists(os.path.join(profile, "Preferences")):
             return False
         with open(max(sessions, key=os.path.getmtime), "rb") as f:
             saved = f.read()
@@ -593,9 +615,9 @@ class LiveRestore(unittest.TestCase):
         in and restores from `state`."""
         c = self.comp
         pids = {w["pid"] for w in c.clients()}
-        # Chromium writes the file 2.5 s after a change, and later on a busy machine:
+        # Chromium writes its session file 2.5 s after a change, and later on a busy machine:
         # a fixed 3 s wait lost both pages once in a full run of the suite.
-        wait_for(lambda: self.has_chromium_saved(pages), "Chromium to write its session file")
+        wait_for(lambda: self.has_chromium_saved(pages), "Chromium to write its profile")
         c.shutdown()
         wait_for(lambda: not any(is_running(pid) for pid in pids), "every app to exit with its compositor")
         c.boot(MONITORS)
@@ -641,6 +663,8 @@ class LiveRestore(unittest.TestCase):
         pages = ("dashboard.html", "article.html")
         for state, state_after in (("state", "state-1"), ("state-1", "state-2")):
             self.restore_after_reboot(state, pages)
+            # A web app's window maps titled with its URL, and its page's title comes later.
+            wait_for(lambda: app_title in {w["title"] for w in c.clients()}, "the web app's page")
             restored = self.snapshot("save", state_after)
             self.assertEqual(windows_by_page(restored), windows_by_page(saved), c.requests())
 
@@ -659,7 +683,7 @@ class LiveRestore(unittest.TestCase):
         states = {w["class"]: (w["floating"], w["pinned"], w["fullscreen"]) for w in saved["windows"]}
         self.assertEqual(states["pip"], (True, True, 0))
         self.assertEqual(states["big"], (False, False, 1))
-        self.assertEqual(group_shapes(saved), [(3, ("alpha", "beta", "chromium"))])
+        self.assertEqual(group_shapes(saved), [(3, ("alpha", "beta", "chromium"), ["chromium"])])
 
         self.comp.shutdown()
         self.comp.boot(tuple(reversed(MONITORS)))
@@ -801,7 +825,10 @@ class LiveRestore(unittest.TestCase):
         before = browser_windows(saved)
         self.assertEqual(before, {"trade": (1, "MON-A"), "dashboard": (3, "MON-A"), "news": (2, "MON-B")})
         wait_for(lambda: c.window(news)["title"].startswith("Brent oil"), "the news window to move on")
-        time.sleep(3)  # Chromium writes its session file 2.5 s after a change
+        wait_for(
+            lambda: self.has_chromium_saved(("trade.html", "dashboard.html", "article.html")),
+            "Chromium to write its profile",
+        )
         c.shutdown()
         wait_for(lambda: not is_running(trade["pid"]), "Chromium to exit with its compositor")
 
@@ -882,7 +909,9 @@ class LiveRestore(unittest.TestCase):
 
         c.shutdown()
         c.boot(MONITORS)
-        restored = c.run_script("restore", os.path.join(self.work, "state"))
+        # The start centre never comes back, so the sweep runs to its end. The window that
+        # does come back maps within a second, well inside 10 s.
+        restored = c.run_script("restore", os.path.join(self.work, "state"), "sweep_timeout = 10\n")
         with self.subTest("launched once, not once per saved window"):
             self.assertEqual(c.requests().count(office[0]["cmd"]), 1, c.requests())
         with self.subTest("one instance, and it is the only thing running"):
@@ -919,7 +948,7 @@ class LiveRestore(unittest.TestCase):
             sorted((w["class"], w["cmd"]) for w in saved["windows"]),
             [("notes", "foot --app-id=notes"), ("steam", "steam")],
         )
-        self.assertEqual(group_shapes(saved), [(1, ("notes", "steam"))])
+        self.assertEqual(group_shapes(saved), [(1, ("notes", "steam"), ["steam"])])
 
         c.shutdown()
         c.boot(MONITORS)
@@ -931,6 +960,160 @@ class LiveRestore(unittest.TestCase):
         with self.subTest("tiled again, and back in its group"):
             self.assertEqual(shape(after), shape(saved), c.requests())
             self.assertEqual(group_shapes(after), group_shapes(saved), c.requests())
+
+    def make_group(self, tabs, shown=None, fullscreen=None):
+        """Groups the windows at the addresses in `tabs`, in that order, then shows the
+        one at `shown` by focusing it, and sets it `fullscreen` or `maximized` if asked."""
+        c = self.comp
+        first, *rest = tabs
+        c.dispatch(f"hl.dsp.group.toggle({{ window = {first} }})")
+        for tab in rest:
+            c.lua(f"hl.get_window({first}).group:add(hl.get_window({tab}))")
+        if shown is not None:
+            c.dispatch(f"hl.dsp.focus({{ window = {shown} }})")
+        if fullscreen is not None:
+            target = f"mode = '{fullscreen}', action = 'set', window = {shown}"
+            c.dispatch(f"hl.dsp.window.fullscreen({{ {target} }})")
+
+    def open_scrambled_group(self):
+        """Four windows on workspace 1, grouped in neither the order they opened in
+        nor its reverse. The last one to join is the one shown."""
+        c = self.comp
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        opened = {
+            name: address(c.open_window(f"foot --app-id={name}")) for name in ("one", "two", "three", "four")
+        }
+        self.make_group([opened[name] for name in ("three", "one", "four", "two")])
+        groups = describe_groups(c.clients())
+        tabs = (("three", False, 0), ("one", False, 0), ("four", False, 0), ("two", True, 0))
+        self.assertEqual(groups, [("1", tabs)])
+        return groups
+
+    def reboot_and_restore(self, settings="", env=None):
+        """Logs out and back in, then restores the snapshot saved to the state directory
+        `state`, with `settings` added to the config file and `env` to restore's environment."""
+        c = self.comp
+        c.shutdown()
+        c.boot(MONITORS)
+        restored = c.run_script("restore", os.path.join(self.work, "state"), settings, env)
+        self.assertEqual(restored.stderr, "", restored.stdout + "\n" + c.log_tail("hyprland"))
+
+    def test_a_group_comes_back_with_its_tabs_in_their_order(self):
+        """Tabs came back in the order their windows turned up, which follows the
+        order restore launched them in, so only the saved order passes here."""
+        self.comp.boot(MONITORS)
+        before = self.open_scrambled_group()
+        self.snapshot("shutdown", "state")
+        self.reboot_and_restore()
+        self.assertEqual(describe_groups(self.comp.clients()), before, self.comp.requests())
+
+    def test_tabs_keep_their_order_when_a_tab_takes_focus_while_its_group_is_built(self):
+        """group:add puts a window after the current tab, and a tab that takes focus
+        becomes the current one. bin/hyprctl focuses the first tab before each window
+        restore adds, as an app asking for focus at that moment would."""
+        self.comp.boot(MONITORS)
+        before = self.open_scrambled_group()
+        self.snapshot("shutdown", "state")
+        self.reboot_and_restore(env={"OLS_FOCUS_BEFORE_GROUP_ADD": "1"})
+        self.assertEqual(describe_groups(self.comp.clients()), before, self.comp.requests())
+
+    def test_each_group_comes_back_showing_its_tab_in_its_fullscreen_mode(self):
+        """Each window that joins a group becomes its shown tab, and joining clears its
+        fullscreen. Three groups of the same apps: one shown first and maximized, one
+        shown last, and one shown in the middle, fullscreen, on a workspace no monitor shows."""
+        c = self.comp
+        c.boot(MONITORS)
+        for workspace, tabs, mode in (
+            (1, ("one", "two", "three"), "maximized"),
+            (2, ("two", "three", "one"), None),
+            (3, ("three", "one", "two"), "fullscreen"),
+        ):
+            # Through 1, so that 3 is made on MON-A, where 1 then hides it.
+            c.dispatch("hl.dsp.focus({ workspace = 1 })")
+            c.dispatch(f"hl.dsp.focus({{ workspace = {workspace} }})")
+            opened = {name: address(c.open_window(f"foot --app-id={name}")) for name in sorted(tabs)}
+            self.make_group([opened[name] for name in tabs], opened["one"], mode)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        before = describe_groups(c.clients())
+        self.assertEqual(
+            before,
+            [
+                ("1", (("one", True, 1), ("two", False, 0), ("three", False, 0))),
+                ("2", (("two", False, 0), ("three", False, 0), ("one", True, 0))),
+                ("3", (("three", False, 0), ("one", True, 2), ("two", False, 0))),
+            ],
+        )
+        self.snapshot("shutdown", "state")
+        self.reboot_and_restore()
+        self.assertEqual(describe_groups(c.clients()), before, c.requests())
+
+    def test_groups_that_lost_a_window_come_back_without_it(self):
+        """The shown tab's app is left out at restore, so its group has no tab to show
+        again and no fullscreen to put back. A group left with one window is no group,
+        and that window keeps the maximized state its group was shown in."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        first = {name: address(c.open_window(f"foot --app-id={name}")) for name in ("one", "two", "three")}
+        self.make_group(list(first.values()), first["two"], "maximized")
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        second = {name: address(c.open_window(f"foot --app-id={name}")) for name in ("four", "five")}
+        self.make_group(list(second.values()), second["five"], "maximized")
+        self.assertEqual(
+            describe_groups(c.clients()),
+            [
+                ("1", (("one", False, 0), ("two", True, 1), ("three", False, 0))),
+                ("2", (("four", False, 0), ("five", True, 1))),
+            ],
+        )
+        self.snapshot("shutdown", "state")
+        self.reboot_and_restore(settings="exclude = two, four\n")
+        left = [("1", (("one", False, 0), ("three", True, 0)))]
+        self.assertEqual(describe_groups(c.clients()), left, c.requests())
+        five = next(w for w in c.clients() if w["class"] == "five")
+        self.assertEqual((five["grouped"], five["fullscreen"]), ([], 1), c.requests())
+
+    def test_a_group_behind_a_fullscreen_window_comes_back_showing_its_tab(self):
+        """While another window is fullscreen over a group, hyprctl reports none of the
+        group's tabs as visible, as with a game over a group holding Steam (2026-10-17)."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        opened = {
+            name: address(c.open_window(f"foot --app-id={name}")) for name in ("one", "two", "three", "game")
+        }
+        self.make_group([opened[name] for name in ("one", "two", "three")], opened["two"])
+        c.dispatch(
+            f"hl.dsp.window.fullscreen({{ mode = 'fullscreen', action = 'set', window = {opened['game']} }})"
+        )
+        covered = [("1", (("one", False, 0), ("two", False, 0), ("three", False, 0)))]
+        self.assertEqual(describe_groups(c.clients()), covered)
+        self.snapshot("shutdown", "state")
+        self.reboot_and_restore()
+        game = next(w for w in c.clients() if w["class"] == "game")
+        self.assertEqual((game["fullscreen"], describe_groups(c.clients())), (2, covered), c.requests())
+        c.dispatch(
+            f"hl.dsp.window.fullscreen({{ mode = 'fullscreen', action = 'unset', window = {address(game)} }})"
+        )
+        shown = [("1", (("one", False, 0), ("two", True, 0), ("three", False, 0)))]
+        self.assertEqual(describe_groups(c.clients()), shown, c.requests())
+
+    def test_a_snapshot_without_tab_order_still_gets_its_groups(self):
+        """Snapshots saved before 2026-10-17 hold no group_position or shown_in_group,
+        and their tabs come back in the order the sweep paired the windows in."""
+        c = self.comp
+        c.boot(MONITORS)
+        self.open_scrambled_group()
+        saved = self.snapshot("shutdown", "state")
+        for w in saved["windows"]:
+            del w["group_position"], w["shown_in_group"]
+        with open(os.path.join(self.work, "state", "session.json"), "w") as f:
+            json.dump(saved, f)
+        self.reboot_and_restore()
+        members = [
+            (workspace, sorted(tab[0] for tab in tabs)) for workspace, tabs in describe_groups(c.clients())
+        ]
+        self.assertEqual(members, [("1", ["four", "one", "three", "two"])], c.requests())
 
     def test_a_terminal_comes_back_with_its_tabs_and_splits(self):
         """A kitty with remote control on describes its own instance, so the

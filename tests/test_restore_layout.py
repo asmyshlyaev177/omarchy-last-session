@@ -209,46 +209,72 @@ class BuildGroups(unittest.TestCase):
     the groups are assembled at the end from whatever the sweep placed. No
     focus, no direction, and no lock holding a half-built group shut."""
 
-    def emit(self, placed):
+    def emit(self, placed, refused=()):
+        """How many groups were built, and every line of Lua sent, in order. An
+        eval in `refused` fails, as Hyprland refuses a window it cannot group."""
+        sent = []
+
+        def evaluate(lua):
+            sent.append(lua)
+            return lua not in refused
+
         with (
-            mock.patch.object(hypr, "dispatch") as dispatched,
-            mock.patch.object(hypr, "eval_lua") as evaluated,
+            mock.patch.object(hypr, "dispatch", side_effect=sent.append),
+            mock.patch.object(hypr, "eval_lua", side_effect=evaluate),
         ):
             built = layout.build_groups(placed)
+        return built, sent
+
+    @staticmethod
+    def member(group, ws=2, **saved):
+        """A group member as saved. Without group_position it is one saved before 2026-10-17."""
+        return dict(saved_window("x", ws=ws), group=group, **saved)
+
+    def tabs(self, count, shown=None, **saved):
+        """A saved group of `count` tabs at addresses 0x0, 0x1, ..., in their saved order."""
+        return [
+            (self.member(0, group_position=i, shown_in_group=i == shown, **saved), f"0x{i}")
+            for i in range(count)
+        ]
+
+    @staticmethod
+    def toggle(address):
+        return f"hl.dsp.group.toggle({{ window = 'address:{address}' }})"
+
+    @staticmethod
+    def add(anchor, address):
         return (
-            built,
-            [c.args[0] for c in dispatched.call_args_list],
-            [c.args[0] for c in evaluated.call_args_list],
+            f"local group = hl.get_window('address:{anchor}').group"
+            f" group:add(hl.get_window('address:{address}'), group.size + 1)"
         )
 
     @staticmethod
-    def member(group, ws=2):
-        return dict(saved_window("x", ws=ws), group=group)
+    def show(index, anchor):
+        return f"hl.dsp.group.active({{ index = {index}, window = 'address:{anchor}' }})"
 
-    def test_the_first_member_anchors_and_the_rest_are_added_to_it(self):
-        built, dispatched, evaluated = self.emit(
-            [(self.member(0), "0xa"), (self.member(0), "0xb"), (self.member(0), "0xc")]
+    @staticmethod
+    def fullscreen(mode, address):
+        return (
+            f"hl.dsp.window.fullscreen({{ mode = '{mode}', action = 'set', window = 'address:{address}' }})"
         )
+
+    def test_the_first_member_anchors_and_the_rest_join_it_at_the_end(self):
+        """At the end, not after the current tab: a window that takes focus
+        becomes the current tab while the group is being built."""
+        built, sent = self.emit([(self.member(0), "0xa"), (self.member(0), "0xb"), (self.member(0), "0xc")])
         self.assertEqual(built, 1)
-        self.assertEqual(dispatched, ["hl.dsp.group.toggle({ window = 'address:0xa' })"])
-        self.assertEqual(
-            evaluated,
-            [
-                "hl.get_window('address:0xa').group:add(hl.get_window('address:0xb'))",
-                "hl.get_window('address:0xa').group:add(hl.get_window('address:0xc'))",
-            ],
-        )
+        self.assertEqual(sent, [self.toggle("0xa"), self.add("0xa", "0xb"), self.add("0xa", "0xc")])
 
     def test_a_group_down_to_one_window_is_not_built(self):
         """Nothing to tab it with. A group of one is also what used to be
         left locked, because the unlock pass walked straight past it."""
-        self.assertEqual(self.emit([(self.member(0), "0xa")]), (0, [], []))
+        self.assertEqual(self.emit([(self.member(0), "0xa")]), (0, []))
 
     def test_windows_that_were_in_no_group_are_ignored(self):
-        self.assertEqual(self.emit([(saved_window("x"), "0xa"), (saved_window("y"), "0xb")]), (0, [], []))
+        self.assertEqual(self.emit([(saved_window("x"), "0xa"), (saved_window("y"), "0xb")]), (0, []))
 
     def test_each_saved_group_is_built(self):
-        built, dispatched, evaluated = self.emit(
+        built, sent = self.emit(
             [
                 (self.member(0), "0xa"),
                 (self.member(0), "0xb"),
@@ -256,21 +282,70 @@ class BuildGroups(unittest.TestCase):
                 (self.member(1), "0xd"),
             ]
         )
-        self.assertEqual((built, len(dispatched), len(evaluated)), (2, 2, 2))
+        self.assertEqual(built, 2)
+        self.assertEqual(
+            sent, [self.toggle("0xa"), self.add("0xa", "0xb"), self.toggle("0xc"), self.add("0xc", "0xd")]
+        )
 
-    def test_members_are_tabbed_in_saved_left_to_right_order(self):
-        """Tabs follow where the windows sat, not the order they turned up."""
-        right = dict(saved_window("x", at=(900, 0)), group=0)
-        left = dict(saved_window("y", at=(0, 0)), group=0)
-        _, dispatched, evaluated = self.emit([(right, "0xr"), (left, "0xl")])
-        self.assertEqual(dispatched, ["hl.dsp.group.toggle({ window = 'address:0xl' })"])
-        self.assertEqual(evaluated, ["hl.get_window('address:0xl').group:add(hl.get_window('address:0xr'))"])
+    def test_members_are_tabbed_in_their_saved_order(self):
+        """Not in the order they turned up in, and not by where they sat."""
+        last, first, middle = (
+            self.member(0, group_position=position, at=[x, 0]) for position, x in ((2, 400), (0, 900), (1, 0))
+        )
+        _, sent = self.emit([(last, "0xc"), (first, "0xa"), (middle, "0xb")])
+        self.assertEqual(sent, [self.toggle("0xa"), self.add("0xa", "0xb"), self.add("0xa", "0xc")])
+
+    def test_a_group_saved_without_its_tab_order_keeps_the_order_the_sweep_paired_it_in(self):
+        """Snapshots written before 2026-10-17 have no group_position. Paired first,
+        0xb is neither the first address nor the leftmost window."""
+        _, sent = self.emit([(self.member(0, at=[900, 0]), "0xb"), (self.member(0, at=[0, 0]), "0xa")])
+        self.assertEqual(sent, [self.toggle("0xb"), self.add("0xb", "0xa")])
+
+    def test_the_tab_the_group_showed_is_shown_again(self):
+        """Each window that joins becomes the shown tab, so the last would be."""
+        for shown in range(3):
+            with self.subTest(shown=shown):
+                _, sent = self.emit(self.tabs(3, shown=shown))
+                self.assertEqual(sent[-1], self.show(shown + 1, "0x0"))
+
+    def test_a_shown_tab_that_was_maximized_or_fullscreen_is_so_again(self):
+        """Joining a group clears a window's fullscreen, which the sweep had put back."""
+        for value, mode in ((1, "maximized"), (2, "fullscreen")):
+            with self.subTest(mode=mode):
+                tabs = self.tabs(2, shown=1)
+                tabs[1][0]["fullscreen"] = value
+                _, sent = self.emit(tabs)
+                self.assertEqual(sent[-2:], [self.show(2, "0x0"), self.fullscreen(mode, "0x1")])
+
+    def test_a_group_whose_shown_tab_did_not_come_back_is_left_showing_its_last(self):
+        """No tab to show again, and no fullscreen to put back."""
+        tabs = self.tabs(3, shown=1)
+        del tabs[1]
+        _, sent = self.emit(tabs)
+        self.assertEqual(sent, [self.toggle("0x0"), self.add("0x0", "0x2")])
+
+    def test_a_tab_hyprland_refuses_does_not_move_the_shown_one(self):
+        """The tabs after a refused window move up one, so the last of three is the second."""
+        _, sent = self.emit(self.tabs(3, shown=2), refused={self.add("0x0", "0x1")})
+        self.assertEqual(sent[-1], self.show(2, "0x0"))
+
+    def test_a_shown_tab_left_on_its_own_still_gets_its_fullscreen_back(self):
+        """Every other tab was refused, so there is no tab to switch to, but making
+        the group cleared its fullscreen all the same."""
+        tabs = self.tabs(2, shown=0)
+        tabs[0][0]["fullscreen"] = 1
+        _, sent = self.emit(tabs, refused={self.add("0x0", "0x1")})
+        self.assertEqual(
+            sent, [self.toggle("0x0"), self.add("0x0", "0x1"), self.fullscreen("maximized", "0x0")]
+        )
 
     def test_no_window_is_focused_and_no_group_is_locked(self):
         """Both were mechanisms of the old build, and both caused bugs: a
         lock left behind refused every window for the rest of the session."""
-        _, dispatched, evaluated = self.emit([(self.member(0), "0xa"), (self.member(0), "0xb")])
-        self.assertFalse(any("lock" in lua or "focus" in lua for lua in dispatched + evaluated))
+        tabs = self.tabs(2, shown=0)
+        tabs[0][0]["fullscreen"] = 1
+        _, sent = self.emit(tabs)
+        self.assertFalse(any("lock" in lua or "focus" in lua for lua in sent))
 
 
 class ReportedBug(RestoreHarness):

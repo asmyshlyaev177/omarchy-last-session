@@ -4,6 +4,7 @@ workspace names put back, workspaces moved onto their monitors and shown there."
 from __future__ import annotations
 
 from omarchy_last_session import hypr
+from omarchy_last_session.restore import placement
 from omarchy_last_session.restore.pairing import Pairing
 from omarchy_last_session.session import SavedWindow
 
@@ -60,22 +61,43 @@ def build_groups(placed: list[Pairing]) -> int:
             members.setdefault(group, []).append((win, address))
     built = 0
     for group in sorted(members):
-        # Tabs follow where the windows sat, not the order they turned up.
-        addresses = [address for _, address in sorted(members[group], key=lambda member: member[0]["at"])]
-        if build_group(addresses):
+        # Not by `at`: hidden tabs share the group's box. A snapshot saved before
+        # group_position keeps the order the sweep paired the windows in.
+        if build_group(sorted(members[group], key=lambda member: member[0].get("group_position", 0))):
             built += 1
     return built
 
 
-def build_group(addresses: list[str]) -> bool:
-    """The first member becomes a group and the rest are added to it."""
-    if len(addresses) < 2:
+def build_group(tabs: list[Pairing]) -> bool:
+    """The first tab becomes a group, and the rest join it in their saved order."""
+    if len(tabs) < 2:
         return False
-    anchor = hypr.quote_window(addresses[0])
+    anchor = hypr.quote_window(tabs[0][1])
     hypr.dispatch(f"hl.dsp.group.toggle({{ window = {anchor} }})")
-    for address in addresses[1:]:
-        hypr.eval_lua(f"hl.get_window({anchor}).group:add(hl.get_window({hypr.quote_window(address)}))")
+    joined = [tabs[0], *(tab for tab in tabs[1:] if add_to_group(anchor, tab[1]))]
+    show_saved_tab(anchor, joined)
     return True
+
+
+def add_to_group(anchor: str, address: str) -> bool:
+    # At the end, not after the current tab: a tab that takes focus while the group
+    # is being built becomes the current one.
+    window = hypr.quote_window(address)
+    return hypr.eval_lua(
+        f"local group = hl.get_window({anchor}).group group:add(hl.get_window({window}), group.size + 1)"
+    )
+
+
+def show_saved_tab(anchor: str, joined: list[Pairing]) -> None:
+    """Every window that joins a group becomes its shown tab and loses its fullscreen.
+    So the saved tab is shown again, then given its fullscreen back."""
+    shown = next((i for i, (win, _) in enumerate(joined) if win.get("shown_in_group")), None)
+    if shown is None:
+        return
+    if len(joined) > 1:
+        hypr.dispatch(f"hl.dsp.group.active({{ index = {shown + 1}, window = {anchor} }})")
+    win, address = joined[shown]
+    placement.apply_fullscreen(win, hypr.quote_window(address))
 
 
 def name_workspaces(windows: list[SavedWindow]) -> int:

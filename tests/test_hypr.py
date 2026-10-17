@@ -92,6 +92,25 @@ class EvalReporting(unittest.TestCase):
         self.assertIn("no reply", err)
 
 
+class ShownTabs(unittest.TestCase):
+    """Read through the Lua REPL: hyprctl's JSON reports none of a group's tabs as
+    visible while another window is fullscreen over it, as a game was over Steam's."""
+
+    def test_each_address_the_query_returns_is_a_shown_tab(self):
+        shown = reply_with("0x57b773ef7f10 0x57b7746f6020\n", hypr.get_shown_tabs)
+        self.assertEqual(shown, ({"0x57b773ef7f10", "0x57b7746f6020"}, ""))
+
+    def test_a_desktop_without_a_group_shows_no_tab(self):
+        self.assertEqual(reply_with("\n", hypr.get_shown_tabs), (set(), ""))
+
+    def test_a_reply_that_is_not_addresses_is_reported_and_shows_no_tab(self):
+        for reply in ("error: [string]:1: attempt to index a nil value", "eval is only supported with lua"):
+            with self.subTest(reply=reply):
+                shown, err = reply_with(reply, hypr.get_shown_tabs)
+                self.assertEqual(shown, set())
+                self.assertIn("could not read which tab each group shows", err)
+
+
 class MonitorOrigins(unittest.TestCase):
     def test_keyed_by_name_and_id(self):
         monitors = [{"id": 0, "name": "eDP-1", "x": 0, "y": 0}, {"id": 1, "name": "DP-9", "x": 1920, "y": 0}]

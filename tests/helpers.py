@@ -199,10 +199,12 @@ class StateDirCase(unittest.TestCase):
         with open(path or self.session) as f:
             return json.load(f)["windows"]
 
-    def save_with(self, clients, cmdline=("/bin/sh",)):
-        """save_session with hyprctl and /proc faked; returns its result."""
+    def save_with(self, clients, cmdline=("/bin/sh",), shown_tabs=()):
+        """save_session with hyprctl and /proc faked, Hyprland showing the group
+        tabs at the addresses in `shown_tabs`; returns its result."""
         with (
             mock.patch.object(hypr, "query", return_value=clients),
+            mock.patch.object(hypr, "get_shown_tabs", return_value=set(shown_tabs)),
             mock.patch.object(proc, "read_cmdline", return_value=list(cmdline)),
         ):
             return session.save_session()

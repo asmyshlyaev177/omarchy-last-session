@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import socket
 import subprocess
@@ -117,6 +118,26 @@ def eval_lua(lua: str) -> bool:
     if reply != "ok":
         warn(f"eval rejected: {reply or 'no reply'}\n  {lua}")
     return reply == "ok"
+
+
+# Every group's shown tab, by address. hyprctl's JSON cannot say which it is: while
+# another window is fullscreen over a group, it reports all of its tabs as not visible.
+SHOWN_TABS = (
+    "local shown = {} for _, w in ipairs(hl.get_windows()) do local group = w.group"
+    " if group and group.size > 1 and group.current and group.current.address == w.address"
+    " then shown[#shown + 1] = w.address end end return table.concat(shown, ' ')"
+)
+ADDRESS = re.compile(r"0x[0-9a-f]+")
+
+
+def get_shown_tabs() -> set[str]:
+    """Through the REPL, the one request that returns what the Lua returns."""
+    reply = _request("repl", SHOWN_TABS)
+    words = reply.split()
+    if not all(ADDRESS.fullmatch(word) for word in words):
+        warn(f"could not read which tab each group shows: {reply}")
+        return set()
+    return set(words)
 
 
 def _request(verb: str, payload: str) -> str:

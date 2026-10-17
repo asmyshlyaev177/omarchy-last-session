@@ -1,9 +1,22 @@
 #!/bin/bash
 # Records every request the script under test sends, for the failure message
-# of a live test, then hands over to the real hyprctl.
+# of a live test, then hands over to the real hyprctl. With
+# OLS_FOCUS_BEFORE_GROUP_ADD set, it first focuses the first tab of the group a
+# window is about to join, as an app asking for focus at that moment would.
 [[ -n ${OLS_HYPRCTL_LOG:-} ]] && printf '%s\n' "$*" >> "$OLS_HYPRCTL_LOG"
-for real in /usr/bin/hyprctl /usr/local/bin/hyprctl; do
-    [[ -x $real ]] && exec "$real" "$@"
+real=
+for candidate in /usr/bin/hyprctl /usr/local/bin/hyprctl; do
+    if [[ -x $candidate ]]; then
+        real=$candidate
+        break
+    fi
 done
-echo "hyprctl not found" >&2
-exit 127
+if [[ -z $real ]]; then
+    echo "hyprctl not found" >&2
+    exit 127
+fi
+first_tab="get_window\('(address:[^']+)'\)\.group"
+if [[ -n ${OLS_FOCUS_BEFORE_GROUP_ADD:-} && ${1:-} == eval && ${2:-} =~ $first_tab ]]; then
+    "$real" dispatch "hl.dsp.focus({ window = '${BASH_REMATCH[1]}' })" > /dev/null
+fi
+exec "$real" "$@"
