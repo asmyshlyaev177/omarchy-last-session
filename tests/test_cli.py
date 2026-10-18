@@ -336,6 +336,35 @@ class MenuRows(ConfigFileCase):
         self.assertEqual(cli.tilde(os.path.expanduser("~") + "2/x"), os.path.expanduser("~") + "2/x")
 
 
+class Arguments(ConfigFileCase):
+    """Only restore takes an option; the other commands ignore what follows their name, as they did."""
+
+    def test_restore_from_the_command_line_is_manual_and_the_shell_passes_login(self):
+        for argv, is_login in ((["restore"], False), (["restore", cli.LOGIN_OPTION], True)):
+            with self.subTest(argv=argv), mock.patch.object(cli.restore, "restore_session") as run:
+                self.assertEqual(cli.main(argv), 0)
+                run.assert_called_once_with(is_login=is_login)
+
+    def test_the_shell_runs_restore_with_the_login_option(self):
+        with open(os.path.join(cli.PLUGIN_DIR, "Service.qml")) as f:
+            self.assertIn(f'command: [root.script, "restore", "{cli.LOGIN_OPTION}"]', f.read())
+
+    def test_an_unknown_restore_option_prints_usage_and_fails(self):
+        with (
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+            mock.patch.object(cli.restore, "restore_session") as run,
+        ):
+            self.assertEqual(cli.main(["restore", "--bogus"]), 1)
+        run.assert_not_called()
+        self.assertIn("restore", err.getvalue())
+
+    def test_the_other_commands_ignore_what_follows_their_name(self):
+        for name in ("save", "shutdown", "daemon", "config", "menu"):
+            with self.subTest(name), mock.patch.object(cli, f"run_{name}", return_value=None) as run:
+                self.assertEqual(cli.main([name, "extra", "--login"]), 0)
+                run.assert_called_once_with()
+
+
 class Usage(unittest.TestCase):
     def test_unknown_command_prints_usage_and_fails(self):
         with mock.patch.object(sys, "stderr", io.StringIO()) as err:

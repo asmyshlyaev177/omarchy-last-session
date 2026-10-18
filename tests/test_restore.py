@@ -2,12 +2,13 @@
 
 import io
 import os
+import stat
 import sys
 from unittest import mock
 
 from omarchy_last_session import config, hypr, restore
 from omarchy_last_session.restore import sweep
-from tests.helpers import RestoreHarness, live_window, saved_window
+from tests.helpers import RestoreHarness, live_window, mode_of, saved_window
 
 
 class ToastWhileRestoring(RestoreHarness):
@@ -65,20 +66,53 @@ class RestoreGuards(RestoreHarness):
         open(self.disabled, "w").close()
         self.assertEqual(self.run_restore([{}]), [])
 
-    def test_a_long_running_session_is_not_restored(self):
-        """A shell restart hours into a session is not a login."""
+    def test_a_second_run_in_the_same_hyprland_launches_nothing(self):
+        """What a shell restart, such as the one omarchy update ends with, does."""
         self.write_session([saved_window("code")])
-        for age, login_window, restored in ((10, 300, True), (4000, 300, False), (4000, 0, True)):
-            with self.subTest(age=age, login_window=login_window):
-                self.patch(config, "LOGIN_WINDOW", login_window)
-                with mock.patch.object(restore, "session_age", return_value=age):
-                    self.assertEqual(bool(self.run_restore([{}])), restored)
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertTrue(self.run_restore([{}], is_login=True))
+            with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(self.run_restore([{}], is_login=True), [])
+        self.assertIn("already ran", err.getvalue())
+        self.assertIn("without --login", err.getvalue())
 
-    def test_an_unreadable_start_time_does_not_stop_restore(self):
+    def test_a_new_hyprland_restores_and_records_its_signature(self):
         self.write_session([saved_window("code")])
-        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "garbled"}):
-            self.assertIsNone(restore.session_age())
+        with open(self.restored_instance, "w") as f:
+            f.write("old_1_2\n")
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "new_3_4"}):
+            self.assertTrue(self.run_restore([{}], is_login=True))
+        with open(self.restored_instance) as f:
+            self.assertEqual(f.read(), "new_3_4")
+
+    def test_without_a_signature_restore_runs_and_records_nothing(self):
+        self.write_session([saved_window("code")])
+        self.assertNotIn("HYPRLAND_INSTANCE_SIGNATURE", os.environ)
+        self.assertTrue(self.run_restore([{}], is_login=True))
+        self.assertTrue(self.run_restore([{}], is_login=True))
+        self.assertFalse(os.path.exists(self.restored_instance))
+
+    def test_a_run_into_a_populated_desktop_still_counts_as_the_login(self):
+        """The populated desktop is the login; a shell restart after the user closes windows is not."""
+        self.write_session([saved_window("code")])
+        populated = {f"0x{i}": live_window("x") for i in range(4)}
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertEqual(self.run_restore([populated], is_login=True), [])
+            self.assertEqual(self.run_restore([{}], is_login=True), [])
+
+    def test_a_manual_restore_runs_whatever_the_login_run_recorded(self):
+        """The once-per-session rule is for the shell's own run; a restore asked for by hand still runs."""
+        self.write_session([saved_window("code")])
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertTrue(self.run_restore([{}], is_login=True))
             self.assertTrue(self.run_restore([{}]))
+            self.assertEqual(self.run_restore([{}], is_login=True), [])
+
+    def test_a_manual_restore_before_the_login_run_leaves_it_to_run(self):
+        self.write_session([saved_window("code")])
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertTrue(self.run_restore([{}]))
+            self.assertTrue(self.run_restore([{}], is_login=True))
 
     def test_missing_session_file(self):
         self.assertEqual(self.run_restore([{}]), [])
@@ -104,6 +138,95 @@ class RestoreGuards(RestoreHarness):
         self.write_session([saved_window("code")])
         few = {f"0x{i}": {"class": "x", "workspace": {"id": 1}} for i in range(3)}
         self.assertEqual(len(self.run_restore([few])), 1)
+
+    def test_a_login_run_stopped_by_the_disabled_flag_still_counts_as_the_login(self):
+        """Removing the flag later in the session must not turn the next shell restart into a login."""
+        self.write_session([saved_window("code")])
+        open(self.disabled, "w").close()
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertEqual(self.run_restore([{}], is_login=True), [])
+            os.remove(self.disabled)
+            with mock.patch.object(sys, "stderr", io.StringIO()) as err:
+                self.assertEqual(self.run_restore([{}], is_login=True), [])
+        self.assertIn("already ran", err.getvalue())
+
+    def test_an_empty_signature_is_no_signature(self):
+        self.write_session([saved_window("code")])
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": ""}):
+            self.assertTrue(self.run_restore([{}], is_login=True))
+            self.assertTrue(self.run_restore([{}], is_login=True))
+        self.assertFalse(os.path.exists(self.restored_instance))
+
+    def test_whitespace_around_the_signature_is_ignored(self):
+        self.write_session([saved_window("code")])
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": " abc_1_2\n"}):
+            self.assertTrue(self.run_restore([{}], is_login=True))
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}):
+            self.assertEqual(self.run_restore([{}], is_login=True), [])
+        with open(self.restored_instance) as f:
+            self.assertEqual(f.read(), "abc_1_2")
+
+
+class RestoredInstanceFile(RestoreHarness):
+    """A marker restore cannot read or write costs a repeat restore, never the login's."""
+
+    SIGNATURE = {"HYPRLAND_INSTANCE_SIGNATURE": "abc_1_2"}
+
+    def login_restores(self):
+        with (
+            mock.patch.dict(os.environ, self.SIGNATURE),
+            mock.patch.object(sys, "stderr", io.StringIO()) as err,
+        ):
+            restored = bool(self.run_restore([{}], is_login=True))
+        return restored, err.getvalue()
+
+    def test_a_garbled_marker_is_warned_about_and_replaced(self):
+        self.write_session([saved_window("code")])
+        with open(self.restored_instance, "wb") as f:
+            f.write(b"\xff\xfe")
+        restored, err = self.login_restores()
+        self.assertTrue(restored)
+        self.assertIn(self.restored_instance, err)
+        with open(self.restored_instance) as f:
+            self.assertEqual(f.read(), "abc_1_2")
+
+    def test_a_directory_in_the_markers_place_restores_at_every_login_run(self):
+        self.write_session([saved_window("code")])
+        os.mkdir(self.restored_instance)
+        for run in (1, 2):
+            with self.subTest(run=run):
+                restored, err = self.login_restores()
+                self.assertTrue(restored)
+                self.assertIn(self.restored_instance, err)
+
+    def test_a_marker_that_cannot_be_written_does_not_stop_restore(self):
+        self.write_session([saved_window("code")])
+        with mock.patch.object(restore.session, "write_private", side_effect=PermissionError("read-only")):
+            restored, err = self.login_restores()
+        self.assertTrue(restored)
+        self.assertIn("read-only", err)
+
+    def test_the_marker_is_this_users_alone(self):
+        self.write_session([saved_window("code")])
+        self.login_restores()
+        self.assertEqual(mode_of(self.restored_instance), 0o600)
+
+    def test_a_symlink_in_the_markers_place_is_replaced_not_followed(self):
+        self.write_session([saved_window("code")])
+        victim = os.path.join(self.state_dir_for_victim(), "victim")
+        with open(victim, "w") as f:
+            f.write("abc_1_2")
+        os.symlink(victim, self.restored_instance)
+        restored, _ = self.login_restores()
+        self.assertTrue(restored, "a planted symlink holding the signature must not skip the login run")
+        self.assertTrue(stat.S_ISREG(os.lstat(self.restored_instance).st_mode))
+        with open(victim) as f:
+            self.assertEqual(f.read(), "abc_1_2")
+
+    def state_dir_for_victim(self):
+        path = os.path.join(os.path.dirname(self.restored_instance), "elsewhere")
+        os.makedirs(path)
+        return path
 
 
 class RestoreKeepsACopy(RestoreHarness):

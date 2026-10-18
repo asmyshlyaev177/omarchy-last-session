@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import time
 
 from omarchy_last_session import config, hypr, notification, session, warn
 from omarchy_last_session.restore import launch, layout, sweep
@@ -16,21 +15,45 @@ TOAST_SUMMARY = "Restoring last session\u2026"
 TOAST_GLYPH = "\U000f05b2"
 
 
-def session_age() -> float | None:
-    """Seconds since Hyprland started, from the start time in its instance signature
-    (<hash>_<unix time>_<pid>), or None when the signature does not say."""
+def read_recorded_instance() -> str | None:
+    """The signature restore --login last ran under; None when there is none to read."""
     try:
-        return time.time() - int(os.environ["HYPRLAND_INSTANCE_SIGNATURE"].split("_")[1])
-    except (KeyError, IndexError, ValueError):
+        with session.open_private(config.RESTORED_INSTANCE_FILE) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as e:
+        warn(f"cannot read {config.RESTORED_INSTANCE_FILE}: {e}")
         return None
 
 
-def restore_session() -> None:
-    if os.path.exists(config.DISABLE_FLAG):
+def record_instance(signature: str) -> None:
+    try:
+        session.write_private(config.RESTORED_INSTANCE_FILE, signature)
+    except OSError as e:
+        warn(f"cannot write {config.RESTORED_INSTANCE_FILE}: {e}")
+
+
+def claim_instance() -> bool:
+    """Records this Hyprland instance for restore; False when restore already ran under it."""
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "").strip()
+    if not signature:
+        return True
+    if read_recorded_instance() == signature:
+        warn(
+            "restore already ran in this Hyprland session, skipping; "
+            "run restore without --login to reopen the session anyway"
+        )
+        return False
+    # Recorded before the disabled and populated checks: no shell start after the first is a login.
+    record_instance(signature)
+    return True
+
+
+def restore_session(is_login: bool = False) -> None:
+    if is_login and not claim_instance():
         return
-    age = session_age()
-    if config.LOGIN_WINDOW and age is not None and age > config.LOGIN_WINDOW:
-        warn("not a fresh login, aborting")
+    if os.path.exists(config.DISABLE_FLAG):
         return
     windows = session.load_session()
     if not windows:

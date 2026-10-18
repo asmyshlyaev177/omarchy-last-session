@@ -345,18 +345,19 @@ class Compositor:
     def config_file(self):
         return os.path.join(self.home, ".config", "omarchy", "last-session.ini")
 
-    def run_script(self, action, state_dir=None, settings="", env=None):
+    def run_script(self, action, state_dir=None, settings="", env=None, options=()):
         """The state directory reaches the script the way it does on a
         desktop: through the config file under XDG_CONFIG_HOME, with any other
         `settings` lines after it. Without one the file is left as it is, or as
-        the script itself writes it. `env` is added to the script's environment."""
+        the script itself writes it. `env` is added to the script's environment,
+        `options` to its command line."""
         if state_dir is not None:
             os.makedirs(os.path.dirname(self.config_file()), exist_ok=True)
             with open(self.config_file(), "w") as f:
                 f.write(f"[general]\nstate_dir = {state_dir}\n{settings}")
         env = dict(self.env, OLS_HYPRCTL_LOG=os.path.join(self.home, "hyprctl.log"), **(env or {}))
         return subprocess.run(
-            [sys.executable, SCRIPT, action], env=env, capture_output=True, text=True, timeout=180
+            [sys.executable, SCRIPT, action, *options], env=env, capture_output=True, text=True, timeout=180
         )
 
     def shutdown(self):
@@ -763,6 +764,55 @@ class LiveRestore(unittest.TestCase):
         wait_for(lambda: {w["class"] for w in c.clients()} == {"keep"} or None, "the kept window alone")
         time.sleep(2)
         self.assertEqual({w["class"] for w in c.clients()}, {"keep"})
+
+    def test_restore_runs_once_per_login_and_not_on_a_shell_restart(self):
+        """A shell restart, such as the one `omarchy update` ends with, runs restore again in the
+        same Hyprland: a window closed by hand stays closed until the next login or a manual restore."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        for app_id in ("notes", "keep", "calc"):
+            c.open_window(f"foot --app-id={app_id}")
+        self.snapshot("save", "state")
+        state = os.path.join(self.work, "state")
+        everything = {"notes", "keep", "calc"}
+
+        def classes():
+            return {w["class"] for w in c.clients()}
+
+        def close_notes():
+            notes = next(w for w in c.clients() if w["class"] == "notes")
+            c.dispatch(f"hl.dsp.window.close({{ window = {address(notes)} }})")
+            wait_for(lambda: "notes" not in classes(), "notes to close")
+
+        c.shutdown()
+        c.boot(MONITORS)
+        login = c.run_script("restore", state, options=["--login"])
+        self.assertEqual(login.stderr, "", login.stdout + c.log_tail("hyprland"))
+        wait_for(lambda: classes() == everything, "the three windows")
+
+        close_notes()
+        shell_restart = c.run_script("restore", state, options=["--login"])
+        self.assertEqual(shell_restart.returncode, 0, shell_restart.stdout + shell_restart.stderr)
+        self.assertIn("already ran", shell_restart.stderr)
+        time.sleep(2)
+        self.assertEqual(classes(), {"keep", "calc"})
+
+        manual = c.run_script("restore", state)
+        self.assertEqual(manual.stderr, "", manual.stdout + c.log_tail("hyprland"))
+        wait_for(lambda: classes() == everything, "notes back from a manual restore")
+
+        close_notes()
+        after_manual = c.run_script("restore", state, options=["--login"])
+        self.assertIn("already ran", after_manual.stderr)
+        time.sleep(2)
+        self.assertEqual(classes(), {"keep", "calc"})
+
+        c.shutdown()
+        c.boot(MONITORS)
+        next_login = c.run_script("restore", state, options=["--login"])
+        self.assertEqual(next_login.stderr, "", next_login.stdout + c.log_tail("hyprland"))
+        wait_for(lambda: classes() == everything, "the three windows again")
 
     def test_two_windows_of_one_browser_keep_their_own_monitors(self):
         """One process, two windows, the same class: only their titles say

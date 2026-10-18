@@ -91,7 +91,7 @@ listen_on unix:@mykitty
 - Titles and floating geometry changed in the last minute before a crash. A clean shutdown loses neither.
 - Same-class windows from one process are told apart by their titles, so two showing the same thing can end up in each other's places. Every pairing is logged.
 
-Restore refuses to run when more than three windows are already open, so enabling the plugin mid-session reopens nothing. It also refuses once Hyprland has been running for more than five minutes (`login_window`), so restarting the shell later in a session reopens nothing either.
+Restore refuses to run when more than three windows are already open, so enabling the plugin mid-session reopens nothing. It also runs only once per Hyprland session, so a shell restart, such as the one `omarchy update` ends with, reopens nothing either. Running `restore` from a terminal still reopens the session.
 
 ## Configuration
 
@@ -112,7 +112,6 @@ The config file is `~/.config/omarchy/last-session.ini`. The plugin writes it th
 | `sweep_timeout` | seconds restore waits for the windows it launched | `30` |
 | `title_settle` | seconds restore waits for an app's windows to turn up and for their titles to stop changing, which is what tells a browser's windows apart | `5` |
 | `max_preexisting_windows` | windows that may already be open before restore refuses to run | `3` |
-| `login_window` | seconds after Hyprland starts during which restore may run, so a shell restart in a long session, such as the one `omarchy update` ends with, reopens nothing; `0` restores whenever the shell starts | `300` |
 
 Two tables, one row per window class:
 
@@ -135,7 +134,7 @@ touch ~/.local/state/omarchy-last-session/disabled
 
 ## Command line
 
-Six commands, which work without the shell service. `restore` runs at login and `daemon` after it; `save` and `shutdown` are for your own scripts; `config` opens the config file in your editor; `menu` prints the rows for your menu file.
+Six commands, which work without the shell service. `restore --login` runs at login and `daemon` after it, and a plain `restore` reopens the session whenever you ask; `save` and `shutdown` are for your own scripts; `config` opens the config file in your editor; `menu` prints the rows for your menu file.
 
 ```sh
 ~/.config/omarchy/plugins/io.github.asmyshlyaev177.last-session/bin/omarchy-last-session save
