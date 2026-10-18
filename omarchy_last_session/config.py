@@ -102,6 +102,12 @@ SETTINGS: dict[str, tuple[SettingValue, str]] = {
         "Restore does nothing when more windows than this are already open, so enabling\n"
         "the plugin mid-session reopens nothing.",
     ),
+    "login_window": (
+        300,
+        "Restore does nothing once Hyprland has been running longer than this many seconds,\n"
+        "so a shell restart in a long session, such as the one omarchy update ends with,\n"
+        "does not reopen windows closed on purpose. 0 restores whenever the shell starts.",
+    ),
 }
 
 
@@ -299,6 +305,7 @@ SAVE_INTERVAL: float
 SWEEP_TIMEOUT: float
 TITLE_SETTLE: float
 MAX_PREEXISTING_WINDOWS: float
+LOGIN_WINDOW: float
 
 
 def apply(settings: Settings) -> None:
@@ -307,6 +314,7 @@ def apply(settings: Settings) -> None:
     global KITTY_SESSION_FILE, KITTY_SESSION_GLOB, EXCLUDE_CLASSES, TUI_PROGRAMS, SHELLS
     global TERMINALS, CHROMIUM_BROWSERS, RESTORE_FLAGS, SESSION_KEEPING_CLASSES, SINGLE_INSTANCE_CLASSES
     global SETTLE_DELAY, SAVE_INTERVAL, SWEEP_TIMEOUT, TITLE_SETTLE, MAX_PREEXISTING_WINDOWS
+    global LOGIN_WINDOW
     # A relative path is taken from home, so every command resolves it alike whatever its cwd.
     state_dir = os.path.expanduser(settings["state_dir"])
     STATE_DIR = os.path.join(HOME, state_dir) if state_dir else DEFAULT_STATE_DIR
@@ -332,6 +340,7 @@ def apply(settings: Settings) -> None:
     SWEEP_TIMEOUT = settings["sweep_timeout"]
     TITLE_SETTLE = settings["title_settle"]
     MAX_PREEXISTING_WINDOWS = settings["max_preexisting_windows"]
+    LOGIN_WINDOW = settings["login_window"]
 
 
 _loaded_stamp: tuple[int, int] | None = None

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import time
 
 from omarchy_last_session import config, hypr, notification, session, warn
 from omarchy_last_session.restore import launch, layout, sweep
@@ -15,8 +16,21 @@ TOAST_SUMMARY = "Restoring last session\u2026"
 TOAST_GLYPH = "\U000f05b2"
 
 
+def session_age() -> float | None:
+    """Seconds since Hyprland started, from the start time in its instance signature
+    (<hash>_<unix time>_<pid>), or None when the signature does not say."""
+    try:
+        return time.time() - int(os.environ["HYPRLAND_INSTANCE_SIGNATURE"].split("_")[1])
+    except (KeyError, IndexError, ValueError):
+        return None
+
+
 def restore_session() -> None:
     if os.path.exists(config.DISABLE_FLAG):
+        return
+    age = session_age()
+    if config.LOGIN_WINDOW and age is not None and age > config.LOGIN_WINDOW:
+        warn("not a fresh login, aborting")
         return
     windows = session.load_session()
     if not windows:

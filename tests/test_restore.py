@@ -65,6 +65,21 @@ class RestoreGuards(RestoreHarness):
         open(self.disabled, "w").close()
         self.assertEqual(self.run_restore([{}]), [])
 
+    def test_a_long_running_session_is_not_restored(self):
+        """A shell restart hours into a session is not a login."""
+        self.write_session([saved_window("code")])
+        for age, login_window, restored in ((10, 300, True), (4000, 300, False), (4000, 0, True)):
+            with self.subTest(age=age, login_window=login_window):
+                self.patch(config, "LOGIN_WINDOW", login_window)
+                with mock.patch.object(restore, "session_age", return_value=age):
+                    self.assertEqual(bool(self.run_restore([{}])), restored)
+
+    def test_an_unreadable_start_time_does_not_stop_restore(self):
+        self.write_session([saved_window("code")])
+        with mock.patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "garbled"}):
+            self.assertIsNone(restore.session_age())
+            self.assertTrue(self.run_restore([{}]))
+
     def test_missing_session_file(self):
         self.assertEqual(self.run_restore([{}]), [])
 
