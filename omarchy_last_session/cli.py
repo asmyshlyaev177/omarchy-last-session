@@ -3,7 +3,8 @@
 save     - snapshot every mapped window (workspace, geometry, relaunch command)
 shutdown - save, then let session-keeping apps exit cleanly; optional, for a
            power menu action wired to run it first
-restore  - relaunch every saved window silently on its original workspace
+restore  - relaunch every saved window silently on its original workspace;
+           with --login, as the shell runs it, only once per Hyprland session
 daemon   - save when Hyprland reports a window moving, so a power button, a
            crash or the power menu costs a few seconds of changes at most
 config   - open the config file in your editor; the daemon picks an edit up
@@ -39,6 +40,9 @@ OMARCHY_DEFAULT_PATH = "/usr/share/omarchy"
 # What Omarchy's Logout, Reboot and Shutdown rows run. The rows are found by these,
 # since their ids, icons and labels are Omarchy's to change.
 POWER_COMMANDS = ("omarchy-system-logout", "omarchy-system-reboot", "omarchy-system-shutdown")
+# Passed by Service.qml: the shell runs restore at every start, so only that run
+# is held to once per Hyprland session.
+LOGIN_OPTION = "--login"
 # The checkout: where the launcher, the manifest and this package live.
 PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -58,6 +62,13 @@ def run_shutdown() -> None:
         print(f"{len(stubborn)} app(s) did not exit in time")
     else:
         print("session-keeping apps exited cleanly")
+
+
+def run_restore(options: list[str]) -> int | None:
+    if options not in ([], [LOGIN_OPTION]):
+        return print_usage()
+    restore.restore_session(is_login=options == [LOGIN_OPTION])
+    return None
 
 
 def run_daemon() -> None:
@@ -159,21 +170,26 @@ def save_if_due(scheduler: session.SaveScheduler) -> float:
         return config.SAVE_INTERVAL
 
 
-COMMANDS: dict[str, Callable[[], int | None]] = {
-    "save": run_save,
-    "shutdown": run_shutdown,
-    "restore": restore.restore_session,
-    "daemon": run_daemon,
-    "config": run_config,
-    "menu": run_menu,
+# Each takes the arguments after its name; only restore has any.
+COMMANDS: dict[str, Callable[[list[str]], int | None]] = {
+    "save": lambda _: run_save(),
+    "shutdown": lambda _: run_shutdown(),
+    "restore": run_restore,
+    "daemon": lambda _: run_daemon(),
+    "config": lambda _: run_config(),
+    "menu": lambda _: run_menu(),
 }
+
+
+def print_usage() -> int:
+    print((__doc__ or "").strip(), file=sys.stderr)
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
     command = COMMANDS.get(args[0]) if args else None
     if command is None:
-        print((__doc__ or "").strip(), file=sys.stderr)
-        return 1
+        return print_usage()
     config.ensure_file()
-    return command() or 0
+    return command(args[1:]) or 0

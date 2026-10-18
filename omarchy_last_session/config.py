@@ -284,6 +284,7 @@ SESSION_FILE: str
 DISABLE_FLAG: str
 LAST_SHUTDOWN_FILE: str
 LAST_RESTORE_FILE: str
+RESTORED_INSTANCE_FILE: str
 KITTY_SESSION_FILE: str
 KITTY_SESSION_GLOB: str
 EXCLUDE_CLASSES: frozenset[str]
@@ -307,11 +308,13 @@ def apply(settings: Settings) -> None:
     global KITTY_SESSION_FILE, KITTY_SESSION_GLOB, EXCLUDE_CLASSES, TUI_PROGRAMS, SHELLS
     global TERMINALS, CHROMIUM_BROWSERS, RESTORE_FLAGS, SESSION_KEEPING_CLASSES, SINGLE_INSTANCE_CLASSES
     global SETTLE_DELAY, SAVE_INTERVAL, SWEEP_TIMEOUT, TITLE_SETTLE, MAX_PREEXISTING_WINDOWS
+    global RESTORED_INSTANCE_FILE
     # A relative path is taken from home, so every command resolves it alike whatever its cwd.
     state_dir = os.path.expanduser(settings["state_dir"])
     STATE_DIR = os.path.join(HOME, state_dir) if state_dir else DEFAULT_STATE_DIR
     SESSION_FILE = os.path.join(STATE_DIR, "session.json")
     DISABLE_FLAG = os.path.join(STATE_DIR, "disabled")
+    RESTORED_INSTANCE_FILE = os.path.join(STATE_DIR, "restored-instance")
     # The daemon overwrites session.json soon after the next login; these two do not.
     LAST_SHUTDOWN_FILE = os.path.join(STATE_DIR, "last-shutdown.json")
     LAST_RESTORE_FILE = os.path.join(STATE_DIR, "last-restore.json")

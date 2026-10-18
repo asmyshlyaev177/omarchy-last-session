@@ -15,7 +15,44 @@ TOAST_SUMMARY = "Restoring last session\u2026"
 TOAST_GLYPH = "\U000f05b2"
 
 
-def restore_session() -> None:
+def read_recorded_instance() -> str | None:
+    """The signature restore --login last ran under; None when there is none to read."""
+    try:
+        with session.open_private(config.RESTORED_INSTANCE_FILE) as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as e:
+        warn(f"cannot read {config.RESTORED_INSTANCE_FILE}: {e}")
+        return None
+
+
+def record_instance(signature: str) -> None:
+    try:
+        session.write_private(config.RESTORED_INSTANCE_FILE, signature)
+    except OSError as e:
+        warn(f"cannot write {config.RESTORED_INSTANCE_FILE}: {e}")
+
+
+def claim_instance() -> bool:
+    """Records this Hyprland instance for restore; False when restore already ran under it."""
+    signature = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "").strip()
+    if not signature:
+        return True
+    if read_recorded_instance() == signature:
+        warn(
+            "restore already ran in this Hyprland session, skipping; "
+            "run restore without --login to reopen the session anyway"
+        )
+        return False
+    # Recorded before the disabled and populated checks: no shell start after the first is a login.
+    record_instance(signature)
+    return True
+
+
+def restore_session(is_login: bool = False) -> None:
+    if is_login and not claim_instance():
+        return
     if os.path.exists(config.DISABLE_FLAG):
         return
     windows = session.load_session()

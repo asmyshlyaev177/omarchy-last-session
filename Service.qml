@@ -4,7 +4,8 @@ import Quickshell.Io
 // Headless service: shortly after the shell starts, reopen the last session,
 // then keep re-saving it. Both processes are children of this object, so a
 // shell restart or a plugin disable ends them and the next instance starts
-// its own; restore itself refuses to run into an already populated desktop.
+// its own; restore itself runs once per Hyprland session and refuses to run
+// into an already populated desktop.
 Item {
   id: root
 
@@ -24,7 +25,7 @@ Item {
 
   Process {
     id: restore
-    command: [root.script, "restore"]
+    command: [root.script, "restore", "--login"]
     stdout: SplitParser { onRead: data => console.log(data) }
     stderr: SplitParser { onRead: data => console.warn(data) }
     onExited: daemon.running = true

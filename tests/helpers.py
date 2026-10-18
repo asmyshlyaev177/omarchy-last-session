@@ -178,11 +178,13 @@ class StateDirCase(unittest.TestCase):
         self.disabled = os.path.join(path, "disabled")
         self.copy = os.path.join(path, "last-shutdown.json")
         self.restored = os.path.join(path, "last-restore.json")
+        self.restored_instance = os.path.join(path, "restored-instance")
         self.patch(config, "STATE_DIR", path)
         self.patch(config, "SESSION_FILE", self.session)
         self.patch(config, "DISABLE_FLAG", self.disabled)
         self.patch(config, "LAST_SHUTDOWN_FILE", self.copy)
         self.patch(config, "LAST_RESTORE_FILE", self.restored)
+        self.patch(config, "RESTORED_INSTANCE_FILE", self.restored_instance)
         self.patch(config, "KITTY_SESSION_FILE", os.path.join(path, "kitty-{pid}.session"))
         self.patch(config, "KITTY_SESSION_GLOB", os.path.join(path, "kitty-*.session"))
 
@@ -231,8 +233,13 @@ class RestoreHarness(StateDirCase):
         # every other line of Lua along
         self.patch(layout, "hold_workspaces", mock.Mock(return_value=0))
         self.patch(layout, "release_workspaces", mock.Mock())
+        # The suite may run inside Hyprland, whose signature would make a test's second restore a repeat.
+        environ = mock.patch.dict(os.environ)
+        environ.start()
+        self.addCleanup(environ.stop)
+        os.environ.pop("HYPRLAND_INSTANCE_SIGNATURE", None)
 
-    def run_restore(self, clients_sequence, sweep_timeout=0):
+    def run_restore(self, clients_sequence, sweep_timeout=0, is_login=False):
         """Every line of Lua restore sent, dispatched or evaluated, and each
         browser profile it marked as cleanly exited, in order. `timeline` has
         the toast going up and down among them, and `toast_seconds` how long
@@ -274,5 +281,5 @@ class RestoreHarness(StateDirCase):
                 side_effect=lambda cls, cmd: sent.append(f"mark_clean_exit {cls} {cmd}"),
             ),
         ):
-            restore.restore_session()
+            restore.restore_session(is_login=is_login)
         return [line for line in sent if not line.startswith("toast ")]
