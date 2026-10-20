@@ -7,7 +7,14 @@ import unittest
 from unittest import mock
 
 from omarchy_last_session import config, proc, relaunch
-from tests.helpers import BRAVE_BLOB, client, pretend_runnable, write_executable
+from tests.helpers import (
+    BRAVE_BLOB,
+    client,
+    pretend_host_process,
+    pretend_runnable,
+    write_executable,
+    write_flatpak_instance,
+)
 
 
 class UnflattenArgv(unittest.TestCase):
@@ -86,6 +93,7 @@ class DesktopDirCase(unittest.TestCase):
         patcher = mock.patch.object(config, "DESKTOP_DIRS", (self.dir.name,))
         patcher.start()
         self.addCleanup(patcher.stop)
+        pretend_host_process(self)
 
     def write_desktop(self, name, body):
         with open(os.path.join(self.dir.name, name), "w") as f:
@@ -235,6 +243,128 @@ class RelaunchCommand(DesktopDirCase):
         self.assertEqual(cmd, "ghostty --working-directory=/home/alex/src")
 
 
+class SandboxedWindows(DesktopDirCase):
+    """A sandboxed process writes its own command line and picks its own class,
+    so neither is replayed on the host: it comes back through its sandbox, from
+    the record the host keeps of it, or not at all (review of 20c7c60)."""
+
+    def setUp(self):
+        super().setUp()
+        self.runtime = tempfile.TemporaryDirectory()
+        self.addCleanup(self.runtime.cleanup)
+        for patcher in (
+            mock.patch.object(proc, "is_host_process", return_value=False),
+            mock.patch.object(proc, "read_namespace_inode", return_value=4026533500),
+            mock.patch.object(proc, "read_cgroup", return_value="/user.slice/app.slice/app-x-1.scope"),
+            mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": self.runtime.name}),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def relaunch(self, cls, cmdline, session_file=None):
+        with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=cmdline):
+            return relaunch.build_relaunch_command(client(cls, pid=2960649), session_file)
+
+    def test_a_flatpak_window_comes_back_through_flatpak(self):
+        write_flatpak_instance(self.runtime.name)
+        self.assertEqual(
+            self.relaunch("org.gnome.TextEditor", ["gnome-text-editor"]),
+            "flatpak run --branch=stable --arch=x86_64 org.gnome.TextEditor",
+        )
+
+    def test_a_flatpak_window_naming_a_host_binary_still_gets_only_the_flatpak_command(self):
+        write_flatpak_instance(self.runtime.name)
+        self.assertEqual(
+            self.relaunch("org.gnome.TextEditor", ["/usr/bin/bash", "-c", "x"]),
+            "flatpak run --branch=stable --arch=x86_64 org.gnome.TextEditor",
+        )
+
+    def test_a_snap_window_comes_back_through_snap_run(self):
+        scope = "app.slice/snap.gedit.gedit-6c8b1fc2-8212-45af-8b8b-2f39f30e2ee5.scope"
+        with mock.patch.object(proc, "read_cgroup", return_value=scope):
+            self.assertEqual(
+                self.relaunch("org.gnome.gedit", ["/snap/gedit/697/usr/bin/gedit", "x"]), "snap run gedit"
+            )
+
+    def test_a_sandboxed_window_with_a_terminal_class_gets_no_terminal_command(self):
+        """The terminal path would read the command lines of its descendants."""
+        with mock.patch.object(proc, "find_descendant") as descendants:
+            self.assertIsNone(self.relaunch("kitty", ["/usr/bin/kitty"]))
+        descendants.assert_not_called()
+
+    def test_a_sandboxed_window_ignores_a_session_file(self):
+        self.assertIsNone(self.relaunch("kitty", ["/usr/bin/kitty"], "/state/kitty-7.session"))
+
+    def test_a_sandboxed_window_without_a_flatpak_or_snap_record_is_dropped(self):
+        """Even when a .desktop entry matches the class it claims."""
+        self.write_desktop("steam.desktop", "[Desktop Entry]\nExec=/usr/bin/steam %U\n")
+        self.assertIsNone(self.relaunch("steam", ["/usr/bin/steam"]))
+
+    def test_a_flatpak_window_with_a_bad_app_id_is_dropped(self):
+        info = "[Application]\nname=org.gnome.TextEditor;sh\n\n[Instance]\nbranch=stable\narch=x86_64\n"
+        write_flatpak_instance(self.runtime.name, info=info)
+        self.assertIsNone(self.relaunch("org.gnome.TextEditor", ["gnome-text-editor"]))
+
+
+class SandboxedTui(unittest.TestCase):
+    def test_a_terminal_running_a_sandboxed_tui_reopens_in_its_shell(self):
+        """The TUI's command line is its own to write, like any sandboxed process's."""
+        tree, comms = {1234: [77, 99]}, {77: "nvim", 99: "bash"}
+        with (
+            mock.patch.object(proc, "is_host_process", side_effect=lambda pid: pid != 77),
+            mock.patch.object(proc, "list_children", side_effect=lambda pid: tree.get(pid, [])),
+            mock.patch.object(proc, "read_comm", side_effect=comms.get),
+            mock.patch.object(proc, "read_cmdline", return_value=["nvim", "-c", "!sh"]),
+            mock.patch.object(proc, "read_cwd", side_effect=lambda pid: f"/cwd/{pid}"),
+        ):
+            cmd = relaunch.build_relaunch_command(client("com.mitchellh.ghostty", pid=1234))
+        self.assertEqual(cmd, "ghostty --working-directory=/cwd/99")
+
+
+class SoarAppImages(DesktopDirCase):
+    """Soar installs GUI apps as AppImages, which run from a mount under
+    /tmp/.mount_ that is gone after a reboot, and export the AppImage's own
+    path as APPIMAGE. Shapes seen on 2026-10-20 with Soar's foot, whose
+    --app-id=x gives the window class x, outside the terminals table."""
+
+    MOUNTED = ["/tmp/.mount_footremp1840/bin/foot", "--app-id=x", "sleep", "60"]
+
+    def relaunch(self, environ, argv=MOUNTED):
+        with (
+            mock.patch.object(proc, "read_cmdline", return_value=list(argv)),
+            mock.patch.object(proc, "read_environ", return_value=environ),
+        ):
+            return relaunch.build_relaunch_command(client("x"))
+
+    def write_appimage(self):
+        path = os.path.join(self.dir.name, "soar", "packages", "foot-1.28.0-2-3cbe11aeaf9f", "foot")
+        write_executable(path)
+        return path
+
+    def test_the_appimage_file_replaces_its_mount_and_keeps_the_arguments(self):
+        appimage = self.write_appimage()
+        self.assertEqual(self.relaunch({"APPIMAGE": appimage}), f"{appimage} --app-id=x sleep 60")
+
+    def test_an_appimage_path_under_the_mount_falls_back_to_the_desktop_entry(self):
+        self.write_desktop("x.desktop", "[Desktop Entry]\nExec=/usr/bin/foot --app-id=x\n")
+        self.assertEqual(
+            self.relaunch({"APPIMAGE": "/tmp/.mount_footremp1840/foot"}), "/usr/bin/foot --app-id=x"
+        )
+
+    def test_a_relative_or_missing_appimage_path_falls_back_to_the_desktop_entry(self):
+        self.write_desktop("x.desktop", "[Desktop Entry]\nExec=/usr/bin/foot --app-id=x\n")
+        for environ in ({"APPIMAGE": "foot"}, {"APPIMAGE": "/nonexistent/foot"}, {}):
+            with self.subTest(environ=environ):
+                self.assertEqual(self.relaunch(environ), "/usr/bin/foot --app-id=x")
+
+    def test_a_process_outside_a_mount_keeps_its_own_argv(self):
+        """APPIMAGE is inherited by what an AppImage starts, so only the mounted binary is swapped."""
+        appimage = self.write_appimage()
+        with pretend_runnable():
+            cmd = self.relaunch({"APPIMAGE": appimage}, argv=["/usr/bin/foot", "-e", "htop"])
+        self.assertEqual(cmd, "/usr/bin/foot -e htop")
+
+
 class AddRestoreFlag(unittest.TestCase):
     def test_not_added_twice(self):
         once = relaunch.add_restore_flag("brave", "brave-browser")
@@ -265,6 +395,9 @@ class ChromiumWebApps(unittest.TestCase):
 
     CHROME = "/opt/google/chrome/chrome"
     WHATSAPP = "chrome-web.whatsapp.com__-Default"
+
+    def setUp(self):
+        pretend_host_process(self)
 
     def relaunch(self, cls, argv):
         with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=list(argv)):
@@ -307,6 +440,9 @@ class InstalledWebApps(unittest.TestCase):
 
     BRAVE = "/opt/brave-bin/brave"
     WHATSAPP = "brave-hnpfjngllnobngcgfapefoaidbinmjnm-Default"
+
+    def setUp(self):
+        pretend_host_process(self)
 
     def relaunch(self, argv):
         with pretend_runnable(), mock.patch.object(proc, "read_cmdline", return_value=list(argv)):

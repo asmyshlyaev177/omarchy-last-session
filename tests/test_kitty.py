@@ -8,12 +8,14 @@ are what kitty actually does, not what its documentation suggests.
 
 import io
 import json
+import os
 import subprocess
 import sys
 import unittest
 from unittest import mock
 
 from omarchy_last_session import kitty, proc
+from tests.helpers import pretend_host_process
 
 
 def pane(pane_id, cwd="/home/alex", cmdline=("/usr/bin/bash",), title="", named=False, active=False):
@@ -40,8 +42,20 @@ def tab(panes, pairs=None, title="", named=False, layout="splits", active=False,
     }
 
 
-def render(*os_windows):
-    return kitty.render_session([{"tabs": list(tabs)} for tabs in os_windows]).splitlines()
+def render(*os_windows, cmdlines=None):
+    """The session file's lines. Each pane's program is read from /proc, which
+    here says what kitty's reply says unless `cmdlines` ({pid: argv}) differs."""
+    if cmdlines is None:
+        cmdlines = {
+            process["pid"]: process["cmdline"]
+            for tabs in os_windows
+            for each_tab in tabs
+            for window in each_tab["windows"]
+            for process in window["foreground_processes"]
+            if "pid" in process
+        }
+    with mock.patch.object(proc, "read_cmdline", side_effect=cmdlines.get):
+        return kitty.render_session([{"tabs": list(tabs)} for tabs in os_windows]).splitlines()
 
 
 class OnePane(unittest.TestCase):
@@ -156,6 +170,9 @@ class TabsAndWindows(unittest.TestCase):
 
 
 class PaneContents(unittest.TestCase):
+    def setUp(self):
+        pretend_host_process(self)
+
     def test_a_tui_is_started_again(self):
         line = render([tab([pane(1, "/repo", cmdline=("/usr/bin/nvim", "README.md"))])])[-1]
         self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo /usr/bin/nvim README.md")
@@ -185,6 +202,9 @@ class UntrustedText(unittest.TestCase):
     whatever ran in the pane printed. A title carrying a newline would be read
     as another directive."""
 
+    def setUp(self):
+        pretend_host_process(self)
+
     def test_a_title_holding_a_newline_is_dropped(self):
         line = render([tab([pane(1, title="ok\nlaunch rm -rf /", named=True)])])[-1]
         self.assertNotIn("rm -rf", line)
@@ -197,14 +217,90 @@ class UntrustedText(unittest.TestCase):
         line = render([tab([pane(1, "/tmp/ok\nlaunch rm -rf /")])])[-1]
         self.assertEqual(line, "launch --var ols_pane=1")
 
+    def test_text_holding_any_line_break_kitty_splits_on_is_dropped(self):
+        """Kitty splits the file with str.splitlines(), which breaks at more than \\n and \\r."""
+        for brk in ("\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"):
+            with self.subTest(brk=repr(brk)):
+                line = render([tab([pane(1, f"/tmp/ok{brk}launch rm -rf /", title=f"a{brk}b", named=True)])])[
+                    -1
+                ]
+                self.assertEqual(line, "launch --var ols_pane=1")
+
     def test_a_program_holding_a_newline_is_dropped(self):
         line = render([tab([pane(1, "/repo", cmdline=("/usr/bin/nvim", "a\nlaunch rm -rf /"))])])[-1]
+        self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo")
+
+
+class LayoutNames(unittest.TestCase):
+    """Kitty reports a tab's layouts by name, an enabled one with its options
+    after a colon; anything else would be read as more of the session file."""
+
+    def test_an_enabled_layout_keeps_its_options(self):
+        lines = render([tab([pane(1)], layouts=("tall:bias=50;full_size=1", "splits:split_axis=horizontal"))])
+        self.assertEqual(lines[1], "enabled_layouts tall:bias=50;full_size=1,splits:split_axis=horizontal")
+
+    def test_an_enabled_layout_holding_a_line_break_or_comma_is_dropped(self):
+        for bad in (
+            "tall\nlaunch rm -rf /",
+            "tall:bias=50\nlaunch sh",
+            "tall,grid",
+            "tall:bias=50 x",
+            "Tall\u2028x",
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(
+                    render([tab([pane(1)], layouts=(bad, "splits"))])[1], "enabled_layouts splits"
+                )
+
+    def test_no_valid_enabled_layout_writes_no_enabled_layouts_line(self):
+        lines = render([tab([pane(1)], layouts=("tall\nlaunch rm -rf /",))])
+        self.assertFalse([line for line in lines if line.startswith("enabled_layouts")])
+
+    def test_a_layout_that_is_not_a_name_writes_no_layout_line(self):
+        for bad in ("splits\nlaunch rm -rf /", "splits\n", "tall:bias=50", ""):
+            with self.subTest(bad=bad):
+                lines = render([tab([pane(1)], layout=bad)])
+                self.assertEqual([line for line in lines if line.startswith("layout")], [])
+                self.assertNotIn("launch rm -rf /", lines)
+
+
+class ProgramFromProc(unittest.TestCase):
+    """Kitty's reply repeats a program's command line, which the program can
+    rewrite; /proc holds the one the host process actually runs."""
+
+    def setUp(self):
+        pretend_host_process(self)
+
+    def test_the_program_is_read_from_proc_not_from_kittys_reply(self):
+        reported = pane(1, "/repo", cmdline=("/usr/bin/nvim", "README.md"))
+        line = render([tab([reported])], cmdlines={901: ["/usr/bin/nvim", "notes.md"]})[-1]
+        self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo /usr/bin/nvim notes.md")
+
+    def test_a_foreground_process_without_a_pid_gives_no_program(self):
+        reported = pane(1, "/repo", cmdline=("/usr/bin/nvim", "README.md"))
+        del reported["foreground_processes"][0]["pid"]
+        with mock.patch.object(proc, "read_cmdline", return_value=["/usr/bin/nvim", "README.md"]):
+            line = kitty.render_session([{"tabs": [tab([reported])]}]).splitlines()[-1]
+        self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo")
+
+    def test_a_process_that_is_gone_gives_no_program(self):
+        line = render([tab([pane(1, "/repo", cmdline=("/usr/bin/nvim",))])], cmdlines={})[-1]
+        self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo")
+
+
+class SandboxedPane(unittest.TestCase):
+    def test_a_sandboxed_tui_is_not_replayed_on_the_host(self):
+        with mock.patch.object(proc, "is_host_process", return_value=False):
+            line = render([tab([pane(1, "/repo", cmdline=("/usr/bin/nvim", "README.md"))])])[-1]
         self.assertEqual(line, "launch --var ols_pane=1 --cwd=/repo")
 
 
 class ListenAddress(unittest.TestCase):
     """Kitty exports its socket to the processes it starts and to nothing else,
     so the address is read from a pane's shell rather than guessed."""
+
+    def setUp(self):
+        pretend_host_process(self)
 
     def read_address(self, environs):
         with (
@@ -217,11 +313,26 @@ class ListenAddress(unittest.TestCase):
         address = self.read_address({11: {}, 12: {"KITTY_LISTEN_ON": "unix:@mykitty-7"}})
         self.assertEqual(address, "unix:@mykitty-7")
 
+    def test_a_pane_running_a_sandboxed_process_is_not_asked_for_the_socket(self):
+        environs = {11: {"KITTY_LISTEN_ON": "unix:@planted"}, 12: {"KITTY_LISTEN_ON": "unix:@mykitty-7"}}
+        with mock.patch.object(proc, "is_host_process", side_effect=lambda pid: pid != 11):
+            self.assertEqual(self.read_address(environs), "unix:@mykitty-7")
+
     def test_a_kitty_without_remote_control_has_no_socket(self):
         self.assertIsNone(self.read_address({11: {"PATH": "/usr/bin"}}))
 
     def test_a_kitty_with_no_panes_left_has_no_socket(self):
         self.assertIsNone(self.read_address({}))
+
+
+class ReadmeConfig(unittest.TestCase):
+    def test_the_readme_has_kitty_listen_on_a_socket_file(self):
+        """An abstract socket (unix:@name) has no file, so a sandboxed app sharing
+        the network namespace could drive kitty's remote control."""
+        readme = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "README.md")
+        with open(readme) as f:
+            listens = [line.split()[1] for line in f if line.startswith("listen_on ")]
+        self.assertEqual(listens, ["unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}"])
 
 
 class ReadLayout(unittest.TestCase):

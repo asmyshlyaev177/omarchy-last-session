@@ -79,8 +79,10 @@ Turning kitty's remote control on is what lets it describe its tabs and splits:
 
 ```conf
 allow_remote_control socket-only
-listen_on unix:@mykitty
+listen_on unix:${XDG_RUNTIME_DIR}/kitty-{kitty_pid}
 ```
+
+Use a socket file as above, not an `@` name: a sandboxed app can reach an `@` socket but not this file.
 
 ## Limits
 

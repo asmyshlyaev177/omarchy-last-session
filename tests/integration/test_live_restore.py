@@ -8,6 +8,7 @@ labwc on the host's render node, or drives the display-only card OLS_DRM_CARD
 names, which vm-run.sh sets up in run.sh's VM.
 """
 
+import fcntl
 import functools
 import glob
 import http.server
@@ -15,6 +16,7 @@ import json
 import os
 import pathlib
 import select
+import shlex
 import shutil
 import signal
 import struct
@@ -62,6 +64,15 @@ BROWSER_PAGES = {
 }
 # A word each page's title keeps, however the rest of it moves.
 PAGE_WORDS = (("Bybit", "trade"), ("JobBot", "dashboard"), ("Home / X", "news"), ("Brent oil", "news"))
+# make-test-flatpak.sh builds and installs the test Flatpak here once for the whole run, shared by
+# every test through FLATPAK_USER_DIR. It takes 1.0 s, timed by install_test_flatpak (2026-10-20).
+# The uid keeps a second user's run on the same host out of the first one's directory.
+FLATPAK_CACHE = f"/tmp/ols-flatpak-{os.getuid()}"
+FLATPAK_USER_DIR = os.path.join(FLATPAK_CACHE, "user")
+FLATPAK_APP = "org.test.Hello"
+FLATPAK_BRANCH = "master"
+# The stand-in sets APPIMAGE with readlink -f, so a symlink on the way to the repo is resolved.
+APPIMAGE = os.path.realpath(os.path.join(HERE, "bin", "hello.AppImage"))
 
 
 def make_png(size, rgb):
@@ -159,6 +170,7 @@ class Compositor:
             XDG_CONFIG_HOME=os.path.join(self.home, ".config"),
             XDG_STATE_HOME=os.path.join(self.home, ".local", "state"),
             PATH=os.path.join(HERE, "bin") + ":" + env.get("PATH", "/usr/bin"),
+            FLATPAK_USER_DIR=FLATPAK_USER_DIR,
         )
         return env
 
@@ -278,7 +290,7 @@ class Compositor:
     def window(self, client):
         return next(c for c in self.clients() if c["address"] == client["address"])
 
-    def open_windows(self, cmd, count=1):
+    def open_windows(self, cmd, count=1, log=lambda: ""):
         """exec cmd on the focused workspace and wait for its windows."""
         before = {c["address"] for c in self.clients()}
         self.dispatch(f"hl.dsp.exec_cmd([[{cmd}]])")
@@ -287,10 +299,10 @@ class Compositor:
             new = [c for c in self.clients() if c["address"] not in before]
             return new if len(new) >= count else None
 
-        return wait_for(arrived, f"{count} window(s) for {cmd}")
+        return wait_for(arrived, f"{count} window(s) for {cmd}", log=log)
 
-    def open_window(self, cmd):
-        return self.open_windows(cmd)[0]
+    def open_window(self, cmd, log=lambda: ""):
+        return self.open_windows(cmd, log=log)[0]
 
     def kitten(self, pid, *args, check=True):
         """One remote control request to the kitty running as `pid`. A kitty
@@ -461,6 +473,76 @@ def is_running(pid):
             return f.read().rsplit(")", 1)[1].split()[0] != "Z"
     except (OSError, IndexError):
         return False
+
+
+def install_test_flatpak():
+    """Builds and installs the test Flatpak on the first call of the run, and returns the command
+    its window is saved with. Tests run in processes of their own, so a lock keeps it to one build."""
+    os.makedirs(FLATPAK_CACHE, exist_ok=True)
+    failed = pathlib.Path(FLATPAK_CACHE, "failed")
+    with open(os.path.join(FLATPAK_CACHE, "lock"), "w") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        # A failed build fails every later test at once, rather than each spending 300 s on it again.
+        if failed.exists():
+            raise AssertionError(failed.read_text())
+        if not os.path.exists(os.path.join(FLATPAK_CACHE, "installed")):
+            started = time.monotonic()
+            problem = build_test_flatpak()
+            if problem:
+                failed.write_text(problem)
+                raise AssertionError(problem)
+            print(f"built the test Flatpak in {time.monotonic() - started:.1f} s", file=sys.stderr)
+            pathlib.Path(FLATPAK_CACHE, "installed").touch()
+    arch = subprocess.run(["flatpak", "--default-arch"], capture_output=True, text=True, check=True)
+    return f"flatpak run --branch={FLATPAK_BRANCH} --arch={arch.stdout.strip()} {FLATPAK_APP}"
+
+
+def build_test_flatpak():
+    """Runs make-test-flatpak.sh, and returns why it failed with its output, or None."""
+    try:
+        built = subprocess.run(
+            [os.path.join(HERE, "make-test-flatpak.sh"), FLATPAK_CACHE, FLATPAK_BRANCH],
+            env=dict(os.environ, FLATPAK_USER_DIR=FLATPAK_USER_DIR),
+            # Bytes, since a timeout's partial output is bytes whatever run() is asked for.
+            capture_output=True,
+            timeout=300,
+        )
+    except subprocess.TimeoutExpired as timeout:
+        return f"the test Flatpak did not build in {timeout.timeout} s:\n{decode_output(timeout)}"
+    if built.returncode != 0:
+        return f"the test Flatpak did not build, status {built.returncode}:\n{decode_output(built)}"
+    return None
+
+
+def decode_output(done):
+    return b"".join(part or b"" for part in (done.stdout, done.stderr)).decode(errors="replace")
+
+
+def read_mount_namespace(pid):
+    return os.readlink(f"/proc/{pid}/ns/mnt")
+
+
+def is_sandboxed(pid):
+    """Whether the process sees another filesystem than this one, as everything in a Flatpak does."""
+    return read_mount_namespace(pid) != read_mount_namespace("self")
+
+
+def read_argv(pid):
+    with open(f"/proc/{pid}/cmdline", "rb") as f:
+        return f.read().decode(errors="surrogateescape").split("\0")[:-1]
+
+
+def find_host_processes(argv):
+    """Pids of the processes outside any sandbox whose command line is argv."""
+    found = []
+    for entry in glob.glob("/proc/[0-9]*"):
+        pid = os.path.basename(entry)
+        try:
+            if read_argv(pid) == argv and not is_sandboxed(pid):
+                found.append(int(pid))
+        except OSError:
+            continue
+    return found
 
 
 def shape(session):
@@ -1338,6 +1420,93 @@ class LiveRestore(unittest.TestCase):
         )
         named = [(w["id"], w["name"]) for w in c.json("workspaces") if w["name"].startswith("Home")]
         self.assertEqual(named, [(1, "Home1")], c.requests())
+
+    # Snap needs snapd and systemd, neither of which runs in the container, so it has no live test.
+
+    def open_flatpak(self, *args):
+        """Opens the test Flatpak's window on workspace 2, and checks it really is in a sandbox."""
+        c = self.comp
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        # What Flatpak, bwrap or the app say on the way goes to a log the timeout message shows.
+        run_log = os.path.join(c.home, "flatpak-run.log")
+        command = shlex.join(["flatpak", "run", FLATPAK_APP, *args]) + " 2>> " + shlex.quote(run_log)
+        window = c.open_window(command, log=lambda: c.log_tail("flatpak-run") + c.log_tail("hyprland"))
+        self.assertTrue(is_sandboxed(window["pid"]), "the Flatpak's window should be in a sandbox")
+        return window
+
+    def test_a_flatpak_window_comes_back_on_its_workspace_through_flatpak_run(self):
+        """Inside the sandbox its process line names /app/bin/hello-term, a path the host does
+        not have, so only the instance record Flatpak keeps outside it says how to start it again."""
+        flatpak_run = install_test_flatpak()
+        c = self.comp
+        c.boot(MONITORS)
+        window = self.open_flatpak()
+        program = read_argv(window["pid"])[0]
+        self.assertEqual(program, "/app/bin/hello-term", "its process line should name a program of the app")
+        self.assertFalse(os.path.exists(program), "the program it names should not exist on the host")
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual([(w["class"], w["cmd"]) for w in saved["windows"]], [(FLATPAK_APP, flatpak_run)])
+
+        self.reboot_and_restore()
+        after = self.snapshot("save", "state-after")
+        self.assertEqual(shape(after), shape(saved), c.requests())
+        (back,) = [w for w in c.clients() if w["class"] == FLATPAK_APP]
+        self.assertTrue(is_sandboxed(back["pid"]), "it should come back inside its sandbox")
+
+    def test_a_flatpak_whose_process_line_names_a_host_program_is_saved_as_flatpak_run(self):
+        """A sandboxed app sets its own argv, so a line that reads as a host command is no command
+        the user ran. Replaying it would run that host program outside the sandbox."""
+        flatpak_run = install_test_flatpak()
+        c = self.comp
+        c.boot(MONITORS)
+        window = self.open_flatpak("--as-host-command")
+        argv = read_argv(window["pid"])
+        self.assertEqual(argv[0], "/usr/bin/foot", "its process line should name a host program")
+        self.assertTrue(os.access(argv[0], os.X_OK), "the program it names should exist on the host")
+
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual([(w["class"], w["cmd"]) for w in saved["windows"]], [(FLATPAK_APP, flatpak_run)])
+
+        self.reboot_and_restore()
+        back = [w for w in c.clients() if w["class"] == FLATPAK_APP]
+        self.assertEqual([is_sandboxed(w["pid"]) for w in back], [True], c.requests())
+        self.assertEqual(find_host_processes(argv), [], "nothing from its process line runs on the host")
+
+    def test_a_window_from_a_sandbox_that_is_not_a_flatpak_is_not_saved(self):
+        """Its command line names files as the sandbox sees them, and nothing outside it records
+        how the sandbox was made, so there is no command that would bring it back."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 1 })")
+        c.open_window("foot --app-id=notes")
+        boxes = {
+            "bwrapped": "bwrap --bind / / --dev-bind /dev /dev foot --app-id=bwrapped sleep 86400",
+            "unshared": "unshare --user --map-current-user --mount foot --app-id=unshared sleep 86400",
+        }
+        for cls, cmd in boxes.items():
+            window = c.open_window(cmd)
+            self.assertTrue(is_sandboxed(window["pid"]), f"{cls} should be in a mount namespace of its own")
+
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual(sorted(w["class"] for w in saved["windows"]), ["notes"], saved["windows"])
+
+    def test_an_appimage_comes_back_through_its_image_with_its_arguments(self):
+        """An AppImage runs from a mount that is gone after a logout. The image it was mounted from
+        is in its APPIMAGE variable, and the arguments after the program are the user's own."""
+        c = self.comp
+        c.boot(MONITORS)
+        c.dispatch("hl.dsp.focus({ workspace = 2 })")
+        args = ["--app-id=hello-appimage", "--title=notes.txt - Hello", "sleep", "86400"]
+        window = c.open_window(shlex.join(["hello.AppImage", *args]))
+        self.assertTrue(read_argv(window["pid"])[0].startswith("/tmp/.mount_"), read_argv(window["pid"]))
+
+        saved = self.snapshot("shutdown", "state")
+        self.assertEqual([w["cmd"] for w in saved["windows"]], [shlex.join([APPIMAGE, *args])])
+
+        self.reboot_and_restore()
+        after = self.snapshot("save", "state-after")
+        self.assertEqual(shape(after), shape(saved), c.requests())
+        self.assertEqual([w["title"] for w in after["windows"]], ["notes.txt - Hello"])
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ import shutil
 import urllib.parse
 from collections.abc import Iterator
 
-from omarchy_last_session import config, hypr, proc
+from omarchy_last_session import config, hypr, proc, sandbox
 
 HOME = os.path.expanduser("~")
 APP_FLAG = "--app="
@@ -29,15 +29,39 @@ INSTALLED_APP_CLASS = re.compile(r"^(?:chrome|chromium|brave|msedge)-(?P<app_id>
 def build_relaunch_command(client: hypr.Client, session_file: str | None = None) -> str | None:
     """The shell command that recreates this window's process, or None."""
     pid, cls = client["pid"], client.get("class", "")
+    # A sandboxed process writes its own command line and picks its own class:
+    # replayed on the host, either would run code outside the sandbox.
+    if not proc.is_host_process(pid):
+        return sandbox.build_sandbox_command(pid)
     if session_file:
         return shlex.join([config.TERMINALS[cls][0], config.KITTY_SESSION_FLAG, session_file])
     if cls in config.TERMINALS:
         return build_terminal_command(pid, cls)
-    argv = fit_app_flags(drop_per_run_args(unflatten_argv(proc.read_cmdline(pid) or [])), cls)
+    argv = fit_app_flags(drop_per_run_args(unflatten_argv(read_relaunch_argv(pid))), cls)
     cmd = shlex.join(argv) if argv else ""
     if not is_replayable(cmd):
         cmd = find_desktop_command(cls) or ""
     return add_restore_flag(cmd, cls) if cmd else None
+
+
+def read_relaunch_argv(pid: int) -> list[str]:
+    """argv, with a mounted AppImage's binary swapped for the AppImage file,
+    since the mount is gone after a reboot."""
+    argv = proc.read_cmdline(pid) or []
+    if not argv or not is_in_appimage_mount(argv[0]):
+        return argv
+    appimage = proc.read_environ(pid).get(config.APPIMAGE_ENV, "")
+    if is_appimage_file(appimage):
+        return [appimage] + argv[1:]
+    return argv
+
+
+def is_in_appimage_mount(path: str) -> bool:
+    return path.startswith(config.APPIMAGE_MOUNT_PREFIX)
+
+
+def is_appimage_file(path: str) -> bool:
+    return os.path.isabs(path) and not is_in_appimage_mount(path) and is_runnable(path)
 
 
 def fit_app_flags(argv: list[str], cls: str) -> list[str]:
@@ -138,7 +162,7 @@ def is_replayable(cmd: str) -> bool:
         return False
     if not tokens or config.DBUS_SERVICE_FLAG in tokens:
         return False
-    return not tokens[0].startswith(config.APPIMAGE_MOUNT_PREFIX) and is_runnable(tokens[0])
+    return not is_in_appimage_mount(tokens[0]) and is_runnable(tokens[0])
 
 
 def add_restore_flag(cmd: str, cls: str) -> str:

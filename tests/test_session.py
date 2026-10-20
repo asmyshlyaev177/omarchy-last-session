@@ -6,7 +6,7 @@ import time
 import unittest
 from unittest import mock
 
-from omarchy_last_session import config, hypr, kitty, proc, session
+from omarchy_last_session import config, hypr, kitty, proc, sandbox, session
 from tests.helpers import (
     BRAVE_BLOB,
     StateDirCase,
@@ -383,6 +383,18 @@ class KittySessions(StateDirCase):
             self.save_with([client("kitty", pid=7)], cmdline=("/usr/bin/kitty",))
         read.assert_not_called()
         self.assertEqual([w["cmd"] for w in self.read_session()], ["/usr/bin/kitty"])
+
+    def test_a_sandboxed_process_claiming_kittys_class_gets_no_session_file(self):
+        """Its socket and its panes would be its own to make up."""
+        with (
+            mock.patch.object(proc, "is_host_process", return_value=False),
+            mock.patch.object(sandbox, "build_sandbox_command", return_value=None),
+            mock.patch.object(kitty, "build_session_text") as read,
+        ):
+            self.save_with([client("kitty", pid=7)])
+        read.assert_not_called()
+        self.assertEqual(self.read_session(), [])
+        self.assertEqual(os.listdir(self.dir.name), ["session.json"])
 
     def test_another_terminal_is_left_alone(self):
         with mock.patch.object(kitty, "build_session_text") as read:

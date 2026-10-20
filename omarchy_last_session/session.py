@@ -134,7 +134,8 @@ def write_kitty_sessions(clients: list[hypr.Client]) -> dict[int, str]:
     pids = sorted(
         {c["pid"] for c in clients if known and c.get("class") == config.KITTY_CLASS and c.get("pid")}
     )
-    for pid in pids:
+    # A sandboxed process can claim kitty's class and hand over a socket of its own.
+    for pid in filter(proc.is_host_process, pids):
         text = kitty.build_session_text(pid)
         if text:
             written[pid] = config.KITTY_SESSION_FILE.format(pid=pid)

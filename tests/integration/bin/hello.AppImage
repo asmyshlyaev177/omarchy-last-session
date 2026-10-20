@@ -1,0 +1,14 @@
+#!/bin/bash
+# Stand-in for an AppImage, which is what Soar installs: its runtime mounts the image at
+# /tmp/.mount_<random>, runs the app from there with APPIMAGE set to the image's own path and
+# the user's arguments passed on, and the mount goes away when the app exits.
+mount=$(mktemp -d /tmp/.mount_helloXXXXXX)
+trap 'rm -rf "$mount"' EXIT
+mkdir -p "$mount/usr/bin"
+cp /usr/bin/foot "$mount/usr/bin/hello"
+APPIMAGE=$(readlink -f "$0") APPDIR=$mount "$mount/usr/bin/hello" "$@" &
+app=$!
+# The app runs in the background because bash runs a trap only once its foreground command is
+# done. HUP skips the EXIT trap unless it is trapped too.
+trap 'kill "$app" 2>/dev/null; wait "$app"; exit' TERM INT HUP
+wait "$app"

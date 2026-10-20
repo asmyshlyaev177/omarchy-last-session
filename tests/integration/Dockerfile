@@ -10,9 +10,10 @@
 #
 # The repository is bind-mounted at /work by run.sh. Chromium is the real
 # browser, for the test whose subject is how it reopens its own windows.
+# Flatpak, with the bubblewrap it pulls in, runs the app make-test-flatpak.sh builds offline.
 FROM docker.io/library/archlinux:latest
 
-RUN pacman -Syu --noconfirm --needed hyprland labwc foot kitty ttf-dejavu mesa python chromium \
+RUN pacman -Syu --noconfirm --needed hyprland labwc foot kitty ttf-dejavu mesa python chromium flatpak \
         qemu-base virtme-ng linux \
     && pacman -Scc --noconfirm
 

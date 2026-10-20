@@ -109,6 +109,43 @@ def pretend_runnable():
     return mock.patch.object(relaunch, "is_runnable", return_value=True)
 
 
+def pretend_host_process(test):
+    """The suite's fake pids may be real processes of someone else on the
+    machine it runs on, so every pid counts as this user's own, outside any sandbox."""
+    patcher = mock.patch.object(proc, "is_host_process", return_value=True)
+    patcher.start()
+    test.addCleanup(patcher.stop)
+
+
+TEXT_EDITOR_INFO = (
+    "[Application]\nname=org.gnome.TextEditor\nruntime=runtime/org.gnome.Platform/x86_64/51\n\n"
+    "[Instance]\ninstance-id=3189576737\nbranch=stable\narch=x86_64\n"
+)
+
+
+FLATPAK_CHILD_PID = 2960648
+
+
+def write_flatpak_instance(
+    runtime_dir,
+    name="3189576737",
+    mnt_namespace=4026533500,
+    info=TEXT_EDITOR_INFO,
+    child_pid=FLATPAK_CHILD_PID,
+):
+    """An instance directory as Flatpak 1.18 writes one under $XDG_RUNTIME_DIR/.flatpak; returns its path."""
+    instance = os.path.join(runtime_dir, ".flatpak", name)
+    os.makedirs(instance)
+    with open(os.path.join(instance, "bwrapinfo.json"), "w") as f:
+        json.dump(
+            {"child-pid": child_pid, "mnt-namespace": mnt_namespace, "net-namespace": 1, "pid-namespace": 2},
+            f,
+        )
+    with open(os.path.join(instance, "info"), "w") as f:
+        f.write(info)
+    return instance
+
+
 def write_executable(path):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w") as f:
@@ -171,6 +208,7 @@ class StateDirCase(unittest.TestCase):
         self.dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.dir.cleanup)
         self.use_state_dir(self.dir.name)
+        pretend_host_process(self)
 
     def use_state_dir(self, path):
         """Point every state path at path, which need not exist yet."""

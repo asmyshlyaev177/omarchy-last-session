@@ -67,6 +67,9 @@ args=(--rm --ulimit core=0 -v "$repo:/work:ro")
 # rootless podman maps the host uid into the container; the root docker daemon
 # already runs the image as its own uid 1000 and rejects the flag.
 if [[ $runtime == podman ]]; then args+=(--userns=keep-id); fi
+# A Flatpak's bwrap mounts a fresh /proc, and the kernel refuses it while podman's masks cover
+# parts of the container's own. Rootless user namespaces themselves work.
+if [[ $runtime == podman ]]; then args+=(--security-opt "unmask=/proc/*"); fi
 if [[ -d /usr/share/omarchy ]]; then
     args+=(-v /usr/share/omarchy:/usr/share/omarchy:ro)
 fi

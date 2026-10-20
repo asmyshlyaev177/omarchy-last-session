@@ -180,6 +180,8 @@ PER_RUN_ARG_PREFIXES = ("--cwd-file", "--splash-pipe")
 # An AppImage mounts under a fresh random suffix on every launch, and prefixes
 # the window class; its .desktop entry is not prefixed.
 APPIMAGE_MOUNT_PREFIX = "/tmp/.mount_"
+# Where the AppImage runtime names the image file it mounted.
+APPIMAGE_ENV = "APPIMAGE"
 CLASS_PREFIXES = ("appimagekit-",)
 # A service invocation, not a way to reopen the window.
 DBUS_SERVICE_FLAG = "--gapplication-service"

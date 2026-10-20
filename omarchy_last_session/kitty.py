@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Iterator
@@ -17,11 +18,15 @@ REMOTE_CONTROL = ["kitten", "@"]
 # Names the pane a later directive splits or focuses; kitty's own window ids
 # do not survive into the new instance.
 PANE_VAR = "ols_pane"
+# Kitty's layout names. A session line is read to its end and split on commas,
+# so an enabled layout's options ("tall:bias=50;full_size=1") hold neither.
+LAYOUT_NAME = re.compile(r"[a-z]+")
+ENABLED_LAYOUT = re.compile(r"[a-z]+(?::[A-Za-z0-9_.;=-]+)?")
 
 
 # What `kitten @ ls` reports, as far as a session file needs it.
 class Process(TypedDict, total=False):
-    cmdline: list[str]
+    pid: int
 
 
 # Every kitty that can rebuild splits (0.36 on) lists these for each pane.
@@ -84,7 +89,8 @@ def build_session_text(pid: int) -> str | None:
 def find_listen_address(pid: int) -> str | None:
     """Kitty exports its socket only to the processes it starts, so the address
     is read from a pane's shell rather than guessed."""
-    for child in proc.list_children(pid):
+    # A pane running a sandboxed app could export an address of its own choosing.
+    for child in filter(proc.is_host_process, proc.list_children(pid)):
         address = proc.read_environ(child).get(LISTEN_ENV)
         if address:
             return address
@@ -126,9 +132,12 @@ def render_tab(tab: Tab) -> list[str]:
     """`new_tab` reads the rest of its line as the title, so the title is
     written plain rather than quoted."""
     lines = ["new_tab " + tab["title"] if is_named(tab) else "new_tab"]
-    if tab.get("enabled_layouts"):
-        lines.append("enabled_layouts " + ",".join(tab["enabled_layouts"]))
-    lines.append("layout " + tab.get("layout", "splits"))
+    enabled = [name for name in tab.get("enabled_layouts") or [] if ENABLED_LAYOUT.fullmatch(name)]
+    if enabled:
+        lines.append("enabled_layouts " + ",".join(enabled))
+    layout = tab.get("layout", "splits")
+    if LAYOUT_NAME.fullmatch(layout):
+        lines.append("layout " + layout)
     return lines + render_panes(tab) + render_active_pane(tab)
 
 
@@ -202,10 +211,18 @@ def build_program_argv(window: Pane) -> list[str]:
     """The TUI a pane is running. A pane at a prompt is left to kitty, which
     opens the user's shell in its directory."""
     for process in window.get("foreground_processes") or []:
-        argv = relaunch.drop_per_run_args(process.get("cmdline") or [])
+        argv = read_host_program(process.get("pid"))
         if argv and os.path.basename(argv[0]) in config.TUI_PROGRAMS:
             return argv if all(is_one_line(arg) for arg in argv) else []
     return []
+
+
+def read_host_program(pid: int | None) -> list[str]:
+    """Read from /proc, not kitty's reply, and only for a host process: a
+    sandboxed program in a pane writes its own command line."""
+    if pid is None or not proc.is_host_process(pid):
+        return []
+    return relaunch.drop_per_run_args(proc.read_cmdline(pid) or [])
 
 
 def is_named(item: Tab | Pane) -> bool:
@@ -216,4 +233,5 @@ def is_named(item: Tab | Pane) -> bool:
 def is_one_line(text: str) -> bool:
     """Kitty reads a session file one directive per line, and a pane's title is
     whatever ran in it printed, so text spanning lines is dropped."""
-    return bool(text) and "\n" not in text and "\r" not in text
+    # Kitty splits with str.splitlines(), which also breaks at \v, \f, \x1c-\x1e, \x85 and \u2028.
+    return text.splitlines() == [text]
